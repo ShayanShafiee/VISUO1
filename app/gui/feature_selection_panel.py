@@ -129,16 +129,16 @@ class FeatureSelectionPanel(QWidget):
         Gathers the complete state of all controls in this panel, including
         Pyradiomics features, Signal Path settings, and Phase cutoffs.
         """
-        # --- 1. Gather Pyradiomics Feature Settings ---
+        # 1. Gather Pyradiomics Feature Settings
         enabled_feature_classes = set()
         selected_features_list = []
         checked_pyradiomics_features = []
 
         root = self.feature_tree.invisibleRootItem()
-        for i in range(root.childCount()): # Iterate through categories
+        for i in range(root.childCount()):
             category_item = root.child(i)
             has_checked_child = False
-            for j in range(category_item.childCount()): # Iterate through features
+            for j in range(category_item.childCount()):
                 feature_item = category_item.child(j)
                 if feature_item.checkState(0) == Qt.CheckState.Checked:
                     has_checked_child = True
@@ -151,20 +151,17 @@ class FeatureSelectionPanel(QWidget):
                 class_name = sample_feature.split('_')[1]
                 enabled_feature_classes.add(class_name)
 
-        # --- 2. Combine all settings into a single dictionary ---
+        # 2. Combine all settings into a single dictionary
         all_settings = {
-            # Pyradiomics settings
             "enable_features": self.feature_checkbox.isChecked(),
             "feature_threshold": self.feature_threshold_spinbox.value(),
             "enabled_feature_classes": list(enabled_feature_classes),
             "selected_features_list": selected_features_list,
-            "checked_pyradiomics_features": checked_pyradiomics_features, # For saving state
+            "checked_pyradiomics_features": checked_pyradiomics_features,
 
-            # Signal Path settings
             "enable_signal_path": self.path_checkbox.isChecked(),
             "signal_path_threshold": self.path_threshold_spinbox.value(),
 
-            # Phase settings
             "phase1_index": self.phase1_spinbox.value(),
             "phase2_index": self.phase2_spinbox.value(),
         }

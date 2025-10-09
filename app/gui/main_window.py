@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
                 "output_directory": self.output_directory,
             },
             "settings_panel": self.settings_panel.get_settings(),
-            "feature_panel": self.feature_panel.get_feature_settings(),
+            "feature_panel": self.feature_panel.get_settings(),
             "analysis_panel": self.analysis_panel.get_settings(),
         }
 
@@ -307,31 +307,37 @@ class MainWindow(QMainWindow):
         # Distribute the loaded settings to all parts of the application
         # Use .get() to avoid errors if a key is missing in the JSON file
         
-        # Main window settings
-        main_settings = master_settings.get("main_window", {})
-        if main_settings.get("main_directory"):
-            self.main_directory = main_settings["main_directory"]
-            self.dir_label.setText(f"Selected: ...{self.main_directory[-40:]}")
-            # Automatically re-scan files after loading the directory
-            self.grouped_files = group_files(self.main_directory)
-            self.image_pair_list = []
-            for animal_data in self.grouped_files.values():
-                for time_data in animal_data.values():
-                    if "WF" in time_data and "FL" in time_data:
-                        self.image_pair_list.append((time_data["WF"], time_data["FL"]))
-            self.image_pair_list.sort()
-            self.statusBar().showMessage(f"Loaded directory and found {len(self.image_pair_list)} image pairs.")
-            self.load_random_preview_image()
-
-        if main_settings.get("output_directory"):
-            self.output_directory = main_settings["output_directory"]
-            self.out_dir_label.setText(f"Selected: ...{self.output_directory[-40:]}")
-
-        # Panel settings
         self.settings_panel.set_settings(master_settings.get("settings_panel", {}))
         self.feature_panel.set_settings(master_settings.get("feature_panel", {}))
         self.analysis_panel.set_settings(master_settings.get("analysis_panel", {}))
 
+        # 2. Handle the main window settings LAST.
+        main_settings = master_settings.get("main_window", {})
+        
+        # Load output directory (this is simple, no extra logic needed)
+        output_dir = main_settings.get("output_directory")
+        if output_dir and os.path.isdir(output_dir):
+            self.output_directory = output_dir
+            self.out_dir_label.setText(self.output_directory)
+        else:
+            self.output_directory = None
+            self.out_dir_label.setText("Not selected.")
+
+        # Load main data directory. This is complex and MUST trigger a full rescan.
+        main_dir = main_settings.get("main_directory")
+        if main_dir and os.path.isdir(main_dir):
+            # Use the robust helper function we already built.
+            # This correctly sets the text, scans files, updates the UI,
+            # and loads the first preview image.
+            self._scan_and_update_main_dir(main_dir)
+        else:
+            # If no valid directory is in the file, reset everything.
+            self.main_directory = None
+            self.dir_label.setText("Not selected.")
+            self.image_pair_list = []
+            self.grouped_files = {}
+            # You might want to clear the preview image here as well.
+        
         self.statusBar().showMessage(f"Settings loaded from {os.path.basename(filepath)}", 3000)
 
     def select_directory(self):
