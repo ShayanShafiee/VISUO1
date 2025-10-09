@@ -1,0 +1,27 @@
+# Ignore your local virtual environments
+VISUO1_env/
+VISUO1_Py3.9_env/
+
+# Ignore any other possible venv folders
+venv/
+.venv/
+env/
+ENV/
+*/venv/
+*/.venv/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore build/distribution folders
+build/
+dist/
+*.egg-info/
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore macOS system files
+.DS_Store
