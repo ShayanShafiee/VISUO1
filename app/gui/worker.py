@@ -17,18 +17,13 @@ from processing.image_processor import (
     apply_lut, create_overlay, crop_image,
     create_placeholder_image, assemble_and_save_collage,
     add_timestamp_to_image, create_colorbar_image, 
-    create_animation_from_frames, add_progress_bar_to_image,
+    create_animation_from_frames, add_progress_bar_to_image, COLOR_MAP,
 )
 
 from processing.feature_extraction import calculate_pyradiomics_features
 from processing.signal_path_analysis import register_animal_time_series, analyze_signal_path
 
-COLOR_MAP = {
-    "White": (255, 255, 255),
-    "Yellow": (0, 255, 255),
-    "Cyan": (255, 255, 0),
-    "Lime Green": (0, 255, 0)
-}
+
 
 class Worker(QObject):
     progress = pyqtSignal(int)
@@ -206,9 +201,12 @@ class Worker(QObject):
                 unwatermarked_collage = np.hstack(collage_images)
                 gradient_width = 40
                 individual_colorbar = create_colorbar_image(
-                    height=unwatermarked_collage.shape[0], gradient_width=gradient_width,
-                    min_val=self.settings["min_intensity"], max_val=self.settings["max_intensity"],
-                    cmap_name=self.settings["lut"], font_size=watermark_size, font_color=watermark_color_bgr
+                    height=unwatermarked_collage.shape[0],
+                    min_val=self.settings["min_intensity"],
+                    max_val=self.settings["max_intensity"],
+                    cmap_name=self.settings["lut"],
+                    font_size=16, # A slightly larger font for the saved image
+                    font_color=watermark_color_bgr # Note: This needs to be BGR
                 )
                 collage_with_colorbar = np.hstack([unwatermarked_collage, individual_colorbar])
                 
@@ -245,9 +243,12 @@ class Worker(QObject):
                 final_rows = [header_row] + remaining_rows
                 master_collage_plain = np.vstack(final_rows)
                 master_colorbar = create_colorbar_image(
-                    height=master_collage_plain.shape[0], gradient_width=gradient_width,
-                    min_val=self.settings["min_intensity"], max_val=self.settings["max_intensity"],
-                    cmap_name=self.settings["lut"], font_size=watermark_size, font_color=watermark_color_bgr
+                    height=master_collage_plain.shape[0],
+                    min_val=self.settings["min_intensity"],
+                    max_val=self.settings["max_intensity"],
+                    cmap_name=self.settings["lut"],
+                    font_size=16,
+                    font_color=watermark_color_bgr # Note: This needs to be BGR
                 )
                 master_collage_with_colorbar = np.hstack([master_collage_plain, master_colorbar])
                 master_filename = f"{group_name}_MASTER_COLLAGE.tif"
@@ -261,7 +262,8 @@ class Worker(QObject):
                 if first_group_collages:
                     sample_height = first_group_collages[0].shape[0]
                     standalone_colorbar = create_colorbar_image(
-                        height=sample_height, gradient_width=gradient_width,
+                        height=sample_height, 
+                        # gradient_width=gradient_width,
                         min_val=self.settings["min_intensity"], max_val=self.settings["max_intensity"],
                         cmap_name=self.settings["lut"], font_size=watermark_size, font_color=watermark_color_bgr
                     )

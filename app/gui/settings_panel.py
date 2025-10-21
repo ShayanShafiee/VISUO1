@@ -39,8 +39,14 @@ class SettingsPanel(QWidget):
         self.transparency_slider.valueChanged.connect(self.settingsChanged.emit)
         overlay_layout.addRow("FL Transparency:", transparency_layout)
         self.lut_combo = QComboBox()
-        self.lut_combo.addItems(sorted(['hot', 'viridis', 'inferno', 'magma', 'cividis', 'gray', 'jet']))
-        self.lut_combo.setCurrentText("hot")
+        # Add standard and quantized colormaps
+        colormaps = [
+            'hot', 'viridis', 'inferno', 'magma', 'cividis', 'gray', 'jet',
+            'tab10', 'tab20', 'tab20b', 'tab20c', 'Pastel1', 'Pastel2',
+            'Paired', 'Accent', 'Dark2', 'Set1', 'Set2', 'Set3', 'flag', 'prism', 'nipy_spectral'
+        ]
+        self.lut_combo.addItems(sorted(colormaps))
+        self.lut_combo.setCurrentText("nipy_spectral")
         self.lut_combo.currentTextChanged.connect(self.settingsChanged.emit)
         overlay_layout.addRow("LUT (Colormap):", self.lut_combo)
         main_layout.addWidget(overlay_group)
@@ -260,7 +266,7 @@ class SettingsPanel(QWidget):
     def set_settings(self, data: dict):
         """Sets all widgets in this panel based on a loaded dictionary."""
         self.transparency_slider.setValue(data.get("transparency", 70))
-        self.lut_combo.setCurrentText(data.get("lut", "hot"))
+        self.lut_combo.setCurrentText(data.get("lut", "nipy_spectral"))
         self.min_intensity_spinbox.setValue(data.get("min_intensity", 100))
         self.max_intensity_spinbox.setValue(data.get("max_intensity", 20000))
         self.reg_checkbox.setChecked(data.get("use_registration", False))

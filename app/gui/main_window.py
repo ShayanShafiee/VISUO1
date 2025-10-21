@@ -503,14 +503,20 @@ class MainWindow(QMainWindow):
         try:
             wf_image = imread(wf_path)
             fl_image = imread(fl_path)
-            settings = self.settings_panel.get_settings()
+            settings = self.settings_panel.get_settings() # We already get the settings here
+            
             fl_rgb = apply_lut(fl_image, settings["min_intensity"], settings["max_intensity"], settings["lut"])
             overlay_image = create_overlay(wf_image, fl_rgb, settings["transparency"])
+            
             if not overlay_image.flags['C_CONTIGUOUS']:
                 overlay_image = np.ascontiguousarray(overlay_image)
             h, w, ch = overlay_image.shape
             q_image = QImage(overlay_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
-            self.preview_panel.update_preview(QPixmap.fromImage(q_image.copy()))
+            
+            # --- MODIFIED: Pass the 'settings' dictionary to the preview panel ---
+            self.preview_panel.update_preview(QPixmap.fromImage(q_image.copy()), settings)
+            # --- END MODIFICATION ---
+
         except Exception as e:
             self.statusBar().showMessage(f"Error updating preview: {e}")
 
@@ -576,7 +582,6 @@ class MainWindow(QMainWindow):
         print("--- DEBUG: Starting worker thread ---")
         self.worker_thread.start()
         print("--- DEBUG: run_processing END ---")
-
 
     @pyqtSlot(str)
     def on_feature_csv_ready(self, raw_path: str):

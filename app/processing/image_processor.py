@@ -9,11 +9,18 @@ from typing import List, Tuple
 import imageio
 
 
+COLOR_MAP = {
+    "White": (255, 255, 255),
+    "Yellow": (0, 255, 255),
+    "Cyan": (255, 255, 0),
+    "Lime Green": (0, 255, 0)
+}
+
 def apply_lut(
     gray_image: np.ndarray, 
     min_val: int, 
     max_val: int, 
-    cmap_name: str = 'hot'
+    cmap_name: str = 'nipy_spectral'
 ) -> np.ndarray:
     """
     Applies a matplotlib colormap to a grayscale image after normalizing it.
@@ -78,9 +85,20 @@ def create_overlay(
     
     return overlay_image
 
+def create_gradient_image(height: int, width: int, cmap_name: str) -> np.ndarray:
+    """
+    Generates a simple vertical color gradient image as a NumPy array.
+    """
+    gradient = np.linspace(1, 0, height).reshape(height, 1)
+    cmap = colormaps.get_cmap(cmap_name)
+    rgb_gradient = (cmap(gradient)[:, :, :3] * 255).astype(np.uint8)
+    # Tile it horizontally to get the desired width
+    gradient_img = np.tile(rgb_gradient, (1, width, 1))
+    return gradient_img
+
 def create_colorbar_image(
     height: int,
-    gradient_width: int, # Width of just the color gradient part
+    total_width: int, # Changed from gradient_width
     min_val: int,
     max_val: int,
     cmap_name: str,
@@ -88,50 +106,40 @@ def create_colorbar_image(
     font_color: Tuple[int, int, int]
 ) -> np.ndarray:
     """
-    Creates a vertical colorbar with dynamically sized text area and stroked labels.
+    Creates a single, seamless vertical color bar with text drawn directly on it.
     """
-    # 1. Determine required text area width
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = cv2.getFontScaleFromHeight(font, font_size, 1)
-    thickness = 1 if font_size < 20 else 2
-    
-    max_text = str(max_val)
-    min_text = str(min_val)
-    
-    (tw_max, _), _ = cv2.getTextSize(max_text, font, font_scale, thickness)
-    (tw_min, _), _ = cv2.getTextSize(min_text, font, font_scale, thickness)
-    
-    margin = 10
-    text_area_width = max(tw_max, tw_min) + (2 * margin)
-
-    # 2. Create the color gradient bar
+    # 1. Create the color gradient bar that fills the entire width
     gradient = np.linspace(1, 0, height).reshape(height, 1)
     cmap = colormaps.get_cmap(cmap_name)
-    colored_gradient = cmap(gradient)
-    rgb_gradient = (colored_gradient[:, :, :3] * 255).astype(np.uint8)
-    gradient_bar = np.tile(rgb_gradient, (1, gradient_width, 1))
+    rgb_gradient = (cmap(gradient)[:, :, :3] * 255).astype(np.uint8)
+    # The gradient now takes up the total_width
+    colorbar_img = np.tile(rgb_gradient, (1, total_width, 1))
 
-    # 3. Create the black text area
-    text_area = np.zeros((height, text_area_width, 3), dtype=np.uint8)
+    # 2. Prepare for drawing text
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = cv2.getFontScaleFromHeight(font, font_size, 1)
+    thickness = 1
+    margin = 5  # Small margin from the top/bottom edges
 
-    # 4. Add stroked text labels
-    stroke_color = (0, 0, 0)
-    stroke_thickness = thickness + 2
-
-    # Max value label (top) - right-aligned
-    (_, th), _ = cv2.getTextSize(max_text, font, font_scale, thickness)
-    pos_max = (text_area_width - tw_max - margin, th + margin)
-    cv2.putText(text_area, max_text, pos_max, font, font_scale, stroke_color, stroke_thickness, cv2.LINE_AA)
-    cv2.putText(text_area, max_text, pos_max, font, font_scale, font_color, thickness, cv2.LINE_AA)
-
-    # Min value label (bottom) - right-aligned
-    pos_min = (text_area_width - tw_min - margin, height - margin)
-    cv2.putText(text_area, min_text, pos_min, font, font_scale, stroke_color, stroke_thickness, cv2.LINE_AA)
-    cv2.putText(text_area, min_text, pos_min, font, font_scale, font_color, thickness, cv2.LINE_AA)
+    # 3. Draw the "Max" value text at the top
+    max_text = str(max_val)
+    (tw, th), _ = cv2.getTextSize(max_text, font, font_scale, thickness)
+    pos_max = ((total_width - tw) // 2, th + margin) # Centered horizontally
     
-    # 5. Combine into final image
-    final_colorbar = np.hstack([gradient_bar, text_area])
-    return final_colorbar
+    # Draw stroked text for readability: black outline, then white fill
+    cv2.putText(colorbar_img, max_text, pos_max, font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(colorbar_img, max_text, pos_max, font, font_scale, font_color, thickness, cv2.LINE_AA)
+
+    # 4. Draw the "Min" value text at the bottom
+    min_text = str(min_val)
+    (tw, th), _ = cv2.getTextSize(min_text, font, font_scale, thickness)
+    pos_min = ((total_width - tw) // 2, height - margin) # Centered horizontally
+    
+    # Draw stroked text for readability
+    cv2.putText(colorbar_img, min_text, pos_min, font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(colorbar_img, min_text, pos_min, font, font_scale, font_color, thickness, cv2.LINE_AA)
+    
+    return colorbar_img
 
 def crop_image(image: np.ndarray, roi: Tuple[int, int, int, int]) -> np.ndarray:
     """
