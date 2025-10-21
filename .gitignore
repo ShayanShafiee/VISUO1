@@ -25,3 +25,7 @@ dist/
 
 # Ignore macOS system files
 .DS_Store
+
+
+# Ignore branding/logo assets directory
+Logos/

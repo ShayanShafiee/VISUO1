@@ -120,7 +120,7 @@ class HeatmapWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SWIR Image Processor")
+        self.setWindowTitle("VISUO1")
         self.setGeometry(100, 100, 1600, 900)
         
         self.main_directory = None

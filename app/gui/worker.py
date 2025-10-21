@@ -202,6 +202,7 @@ class Worker(QObject):
                 gradient_width = 40
                 individual_colorbar = create_colorbar_image(
                     height=unwatermarked_collage.shape[0],
+                    total_width=gradient_width,
                     min_val=self.settings["min_intensity"],
                     max_val=self.settings["max_intensity"],
                     cmap_name=self.settings["lut"],
@@ -242,8 +243,10 @@ class Worker(QObject):
                 remaining_rows = collages[1:]
                 final_rows = [header_row] + remaining_rows
                 master_collage_plain = np.vstack(final_rows)
+                master_colorbar_width = 40
                 master_colorbar = create_colorbar_image(
                     height=master_collage_plain.shape[0],
+                    total_width=master_colorbar_width,
                     min_val=self.settings["min_intensity"],
                     max_val=self.settings["max_intensity"],
                     cmap_name=self.settings["lut"],
@@ -261,9 +264,10 @@ class Worker(QObject):
                 first_group_collages = next(iter(master_collage_data.values()))
                 if first_group_collages:
                     sample_height = first_group_collages[0].shape[0]
+                    standalone_colorbar_width = 40
                     standalone_colorbar = create_colorbar_image(
                         height=sample_height, 
-                        # gradient_width=gradient_width,
+                        total_width=standalone_colorbar_width,
                         min_val=self.settings["min_intensity"], max_val=self.settings["max_intensity"],
                         cmap_name=self.settings["lut"], font_size=watermark_size, font_color=watermark_color_bgr
                     )
