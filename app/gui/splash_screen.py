@@ -1,9 +1,10 @@
 # --- gui/splash_screen.py ---
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QColor
 
 # Inherit directly from QVideoWidget for a borderless video player
 class SplashScreen(QVideoWidget):
@@ -22,6 +23,9 @@ class SplashScreen(QVideoWidget):
         self.setFixedSize(960, 540)
         self.center_on_screen()
 
+        # Subtle shadow only (rounded corners removed)
+        self._add_shadow()
+
         # Simplified Multimedia Setup
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -33,6 +37,13 @@ class SplashScreen(QVideoWidget):
 
         # Connect the signal for when the video's status changes
         self.player.mediaStatusChanged.connect(self._handle_media_status)
+
+    def _add_shadow(self):
+        effect = QGraphicsDropShadowEffect(self)
+        effect.setBlurRadius(40)
+        effect.setOffset(0, 0)
+        effect.setColor(QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(effect)
 
     def center_on_screen(self):
         screen_geo = QApplication.primaryScreen().geometry()
@@ -67,3 +78,5 @@ class SplashScreen(QVideoWidget):
         if self.main_window:
             self.main_window.showFullScreen()
         self.close()
+
+    # No rounded-corner mask to maintain on resize

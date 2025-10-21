@@ -6,6 +6,8 @@ import atexit
 import tempfile
 import psutil
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath
+from PyQt6.QtCore import Qt
 from gui.main_window import MainWindow
 from gui.splash_screen import SplashScreen
 
@@ -101,9 +103,43 @@ if __name__ == '__main__':
     except Exception:
         pass
 
-    # The rest of the launch logic is unchanged
+    # Resolve asset paths for script and bundled (PyInstaller) execution
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    video_path = os.path.join(current_dir, 'assets', 'logo_animation.mp4')
+    base_dir = getattr(sys, '_MEIPASS', current_dir)
+
+    # App icon (rounded corners)
+    def _make_rounded_icon(png_path: str, radius: int = 24) -> QIcon:
+        if not os.path.exists(png_path):
+            return QIcon()
+        pix = QPixmap(png_path)
+        if pix.isNull():
+            return QIcon()
+        size = min(pix.width(), pix.height())
+        if size <= 0:
+            return QIcon()
+        # Scale/crop to square
+        square = pix.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+        rounded = QPixmap(size, size)
+        rounded.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(rounded)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addRoundedRect(0.0, 0.0, float(size), float(size), float(radius), float(radius))
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, square)
+        painter.end()
+        return QIcon(rounded)
+
+    icon_path = os.path.join(base_dir, 'assets', 'Icon.png')
+    icon = _make_rounded_icon(icon_path, radius=24)
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+    else:
+        print(f"Warning: App icon not found or invalid at '{icon_path}'.")
+
+    # Splash video
+    video_path = os.path.join(base_dir, 'assets', 'logo_animation.mp4')
     
     if SHOW_SPLASH_SCREEN and os.path.exists(video_path):
         splash = SplashScreen(video_path)
@@ -111,6 +147,9 @@ if __name__ == '__main__':
         splash.play_animation()
         
         window = MainWindow()
+        # Ensure main window also carries the app icon
+        if not icon.isNull():
+            window.setWindowIcon(icon)
         splash.set_main_window(window)
         
     else:
@@ -118,6 +157,8 @@ if __name__ == '__main__':
              print(f"Warning: Splash screen video not found at '{video_path}'.")
              
         window = MainWindow()
+        if not icon.isNull():
+            window.setWindowIcon(icon)
         window.showFullScreen()
     
     sys.exit(app.exec())
