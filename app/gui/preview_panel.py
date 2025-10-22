@@ -7,8 +7,8 @@ from processing.image_processor import create_gradient_image
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLayout, QApplication,
                              QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
                              QGraphicsView, QGraphicsScene)
-from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF
+from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF, QSize
 
 from .interactive_roi import InteractiveROI
 
@@ -244,12 +244,21 @@ class PreviewPanel(QWidget):
 
         # 2a. ZOOM CONTROLS
         zoom_layout = QHBoxLayout()
-        self.zoom_out_btn = QPushButton("-")
-        self.zoom_home_btn = QPushButton("Home")
-        self.zoom_in_btn = QPushButton("+")
-        self.zoom_out_btn.setFixedWidth(40)
-        self.zoom_in_btn.setFixedWidth(40)
-        self.zoom_home_btn.setFixedWidth(70)
+        self.zoom_out_btn = QPushButton("")
+        self.zoom_home_btn = QPushButton("")
+        self.zoom_in_btn = QPushButton("")
+        # Use square buttons with icon-only layout
+        for b in (self.zoom_out_btn, self.zoom_home_btn, self.zoom_in_btn):
+            b.setFixedSize(36, 36)
+            b.setIconSize(QSize(22, 22))
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Apply custom-drawn icons
+        self.zoom_out_btn.setIcon(self._make_zoom_icon(plus=False))
+        self.zoom_out_btn.setToolTip("Zoom Out")
+        self.zoom_in_btn.setIcon(self._make_zoom_icon(plus=True))
+        self.zoom_in_btn.setToolTip("Zoom In")
+        self.zoom_home_btn.setIcon(self._make_home_icon())
+        self.zoom_home_btn.setToolTip("Reset (Home)")
         self.zoom_out_btn.clicked.connect(self.zoom_out)
         self.zoom_in_btn.clicked.connect(self.zoom_in)
         self.zoom_home_btn.clicked.connect(self.zoom_home)
@@ -258,6 +267,64 @@ class PreviewPanel(QWidget):
         zoom_layout.addWidget(self.zoom_in_btn)
         zoom_layout.addStretch(1)
         top_level_layout.addLayout(zoom_layout)
+
+    def _make_zoom_icon(self, plus: bool = True) -> QIcon:
+        """Create a magnifying-glass icon with + or - drawn programmatically (no external assets)."""
+        size = 64  # draw large, then scale via iconSize
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Colors
+        pen = QPen(QColor(230, 230, 230))
+        pen.setWidthF(size * 0.06)
+        p.setPen(pen)
+        # Lens
+        center = QPoint(int(size * 0.42), int(size * 0.42))
+        radius = int(size * 0.28)
+        p.drawEllipse(center, radius, radius)
+        # Handle (45 degrees)
+        handle_len = int(size * 0.24)
+        # Start from lens edge at 45 degrees
+        from PyQt6.QtCore import QPointF
+        import math
+        angle = math.radians(45)
+        start = QPointF(center.x() + radius / math.sqrt(2), center.y() + radius / math.sqrt(2))
+        end = QPointF(start.x() + handle_len * math.cos(angle), start.y() + handle_len * math.sin(angle))
+        p.drawLine(start, end)
+        # Plus/Minus inside lens
+        inner_w = int(radius * 1.0)
+        cx, cy = center.x(), center.y()
+        p.drawLine(QPoint(cx - inner_w//2, cy), QPoint(cx + inner_w//2, cy))
+        if plus:
+            p.drawLine(QPoint(cx, cy - inner_w//2), QPoint(cx, cy + inner_w//2))
+        p.end()
+        return QIcon(pm)
+
+    def _make_home_icon(self) -> QIcon:
+        """Create a simple home/house icon programmatically."""
+        size = 64
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(230, 230, 230))
+        pen.setWidthF(size * 0.06)
+        p.setPen(pen)
+        # House base
+        margin = int(size * 0.18)
+        base_top = int(size * 0.48)
+        p.drawRect(margin, base_top, size - 2*margin, int(size * 0.30))
+        # Roof (triangle)
+        from PyQt6.QtCore import QPoint
+        roof_apex = QPoint(size//2, int(size * 0.22))
+        left_base = QPoint(margin, base_top)
+        right_base = QPoint(size - margin, base_top)
+        p.drawLine(left_base, roof_apex)
+        p.drawLine(roof_apex, right_base)
+        p.drawLine(right_base, left_base)
+        p.end()
+        return QIcon(pm)
 
         # Add a stretch to the main vertical layout
         # This pushes the entire image_and_bar_layout content to the top.
