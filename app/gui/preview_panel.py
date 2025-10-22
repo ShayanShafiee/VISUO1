@@ -51,14 +51,11 @@ class ZoomableImageView(QGraphicsView):
         """Replace the pixmap without resetting the current zoom/transform.
         Optionally keep the same viewport center in scene coordinates.
         """
-        # Preserve current viewing state as precisely as possible
-        old_total_scale = self.transform().m11()  # current applied scale (x axis)
-        old_h = self.horizontalScrollBar().value()
-        old_v = self.verticalScrollBar().value()
-        center_scene = None
+        # Preserve current viewing state based on the viewport's top-left in scene coords
+        old_total_scale = self.transform().m11()
+        saved_tl_scene = None
         if preserve_center and self.has_image():
-            # Also keep a scene center fallback in case scrollbar ranges change
-            center_scene = self.mapToScene(self.viewport().rect().center())
+            saved_tl_scene = self.mapToScene(self.viewport().rect().topLeft())
 
         # Update pixmap and scene rect (keeps item at 0,0)
         self._pixmap_item.setPixmap(pixmap)
@@ -68,19 +65,17 @@ class ZoomableImageView(QGraphicsView):
         self._update_fit_scale()
 
         # Recalculate zoom_factor so that total scale remains exactly the same
-        # Avoid cumulative drift from floating/int rounding
         if self._base_fit_scale > 0:
             self._zoom_factor = max(self._min_zoom, min(self._max_zoom, old_total_scale / self._base_fit_scale))
         # Reapply transform at the same absolute scale
         self._apply_zoom()
 
-        if preserve_center:
-            # First, try to restore exact scroll positions (most stable for same-size updates)
-            self.horizontalScrollBar().setValue(old_h)
-            self.verticalScrollBar().setValue(old_v)
-            # If scene size changed and scrollbars adjusted, fall back to scene center
-            if center_scene is not None:
-                self.centerOn(center_scene)
+        # Restore the viewport top-left scene point precisely to avoid drift
+        if preserve_center and saved_tl_scene is not None:
+            # Determine current viewport size in scene units at the applied scale
+            current_scene_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+            target_center = saved_tl_scene + current_scene_rect.center() - current_scene_rect.topLeft()
+            self.centerOn(target_center)
 
     def _update_fit_scale(self):
         if not self.has_image():
@@ -202,6 +197,11 @@ class PreviewPanel(QWidget):
         self.current_settings = {}
         # Maintain a canonical ROI in image coordinates so it doesn't drift on resizes
         self._image_roi = None
+        # Suppress overlay/ROI sync while the view is updating to avoid jitter
+        self._updating_view = False
+        self._overlay_defer_timer = QTimer(self)
+        self._overlay_defer_timer.setSingleShot(True)
+        self._overlay_defer_timer.timeout.connect(self._sync_overlay_to_view)
         # Guard to prevent feedback loops when programmatically updating the ROI
         self._suppress_roi_signal = False
         # Debounce timer to finalize ROI redraw after window resizing
@@ -304,6 +304,10 @@ class PreviewPanel(QWidget):
         """Update the on-screen ROI overlay based on a given image-space ROI.
         Uses view mapping to handle zoom and pan correctly.
         """
+        if self._updating_view:
+            # Defer ROI updates until the view settles to prevent visible jitter
+            self._overlay_defer_timer.start(0)
+            return
         self._image_roi = QRect(roi) if roi is not None else None
         if self._image_roi is None or not hasattr(self, 'image_view'):
             return
@@ -368,14 +372,21 @@ class PreviewPanel(QWidget):
     def update_preview(self, pixmap: QPixmap, settings: dict):
         self.original_pixmap = pixmap
         self.current_settings = settings  # Store the settings
-        if hasattr(self, 'image_view'):
-            if not self.image_view.has_image():
-                # First time: set and fit
-                self.image_view.set_pixmap(pixmap)
-            else:
-                # Subsequent updates (e.g., intensity/LUT changes): preserve zoom/center
-                self.image_view.update_pixmap(pixmap, preserve_center=True)
-        self._rescale_ui()  # Trigger a UI refresh (colorbar + overlay)
+        self._updating_view = True
+        try:
+            if hasattr(self, 'image_view'):
+                if not self.image_view.has_image():
+                    # First time: set and fit
+                    self.image_view.set_pixmap(pixmap)
+                else:
+                    # Subsequent updates (e.g., intensity/LUT changes): preserve zoom/center
+                    self.image_view.update_pixmap(pixmap, preserve_center=True)
+            # Update colorbar and schedule overlay sync once
+            self._rescale_ui()
+        finally:
+            self._updating_view = False
+        # After view settles, sync overlay exactly once to avoid flicker
+        self._overlay_defer_timer.start(0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -441,6 +452,10 @@ class PreviewPanel(QWidget):
 
     def _sync_overlay_to_view(self):
         """Reposition ROI overlay to match current viewport and redraw ROI rectangle."""
+        if self._updating_view:
+            # Defer until the view finishes updating transforms/scrollbars
+            self._overlay_defer_timer.start(0)
+            return
         if not hasattr(self, 'image_view') or not hasattr(self, 'roi_widget'):
             return
         self.roi_widget.setGeometry(self.image_view.viewport().rect())
