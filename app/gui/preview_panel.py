@@ -5,11 +5,127 @@ import cv2
 import numpy as np
 from processing.image_processor import create_gradient_image
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLayout, QApplication,
-                             QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox)
-from PyQt6.QtGui import QPixmap, QImage
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer
+                             QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
+                             QGraphicsView, QGraphicsScene)
+from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF
 
 from .interactive_roi import InteractiveROI
+
+
+class ZoomableImageView(QGraphicsView):
+    """A QGraphicsView-based image viewer that supports smooth zoom and pan
+    without affecting the window's layout size. The scene holds a single
+    pixmap item at (0,0) in scene coordinates.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setScene(QGraphicsScene(self))
+        self._pixmap_item = self.scene().addPixmap(QPixmap())
+        self._pixmap_item.setPos(0, 0)
+        self._base_fit_scale = 1.0
+        self._zoom_factor = 1.0
+        self._min_zoom = 0.25
+        self._max_zoom = 8.0
+        self._zoom_step = 1.2
+        # View configuration
+        self.setRenderHints(self.renderHints() | QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setFrameShape(QGraphicsView.Shape.NoFrame)
+
+    def has_image(self) -> bool:
+        return not self._pixmap_item.pixmap().isNull()
+
+    def set_pixmap(self, pixmap: QPixmap):
+        self._pixmap_item.setPixmap(pixmap)
+        self.scene().setSceneRect(0, 0, pixmap.width(), pixmap.height())
+        # Reset view transform and fit to viewport
+        self.resetTransform()
+        self._update_fit_scale()
+        self._zoom_factor = 1.0
+        self._apply_zoom()
+
+    def update_pixmap(self, pixmap: QPixmap, preserve_center: bool = True):
+        """Replace the pixmap without resetting the current zoom/transform.
+        Optionally keep the same viewport center in scene coordinates.
+        """
+        # Preserve current viewing state as precisely as possible
+        old_total_scale = self.transform().m11()  # current applied scale (x axis)
+        old_h = self.horizontalScrollBar().value()
+        old_v = self.verticalScrollBar().value()
+        center_scene = None
+        if preserve_center and self.has_image():
+            # Also keep a scene center fallback in case scrollbar ranges change
+            center_scene = self.mapToScene(self.viewport().rect().center())
+
+        # Update pixmap and scene rect (keeps item at 0,0)
+        self._pixmap_item.setPixmap(pixmap)
+        self.scene().setSceneRect(0, 0, pixmap.width(), pixmap.height())
+
+        # Recompute base fit scale for accurate Home behavior
+        self._update_fit_scale()
+
+        # Recalculate zoom_factor so that total scale remains exactly the same
+        # Avoid cumulative drift from floating/int rounding
+        if self._base_fit_scale > 0:
+            self._zoom_factor = max(self._min_zoom, min(self._max_zoom, old_total_scale / self._base_fit_scale))
+        # Reapply transform at the same absolute scale
+        self._apply_zoom()
+
+        if preserve_center:
+            # First, try to restore exact scroll positions (most stable for same-size updates)
+            self.horizontalScrollBar().setValue(old_h)
+            self.verticalScrollBar().setValue(old_v)
+            # If scene size changed and scrollbars adjusted, fall back to scene center
+            if center_scene is not None:
+                self.centerOn(center_scene)
+
+    def _update_fit_scale(self):
+        if not self.has_image():
+            self._base_fit_scale = 1.0
+            return
+        vw = max(1, self.viewport().width())
+        vh = max(1, self.viewport().height())
+        pw = max(1, self._pixmap_item.pixmap().width())
+        ph = max(1, self._pixmap_item.pixmap().height())
+        self._base_fit_scale = min(vw / pw, vh / ph)
+
+    def total_scale(self) -> float:
+        return self._base_fit_scale * self._zoom_factor
+
+    def _apply_zoom(self):
+        self.resetTransform()
+        self.scale(self.total_scale(), self.total_scale())
+        # Enable hand-drag only when zoomed beyond fit
+        if self._zoom_factor > 1.0:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+    # External API
+    def zoom_in(self):
+        self._zoom_factor = min(self._max_zoom, self._zoom_factor * self._zoom_step)
+        self._apply_zoom()
+
+    def zoom_out(self):
+        self._zoom_factor = max(self._min_zoom, self._zoom_factor / self._zoom_step)
+        self._apply_zoom()
+
+    def zoom_home(self):
+        self._zoom_factor = 1.0
+        self._apply_zoom()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # When the viewport resizes, recompute base fit and reapply zoom so fit/home works
+        old_scene_pos = self.mapToScene(self.viewport().rect().center()) if self.has_image() else None
+        self._update_fit_scale()
+        self._apply_zoom()
+        # Try to keep the same center point during a resize
+        if old_scene_pos is not None:
+            self.centerOn(old_scene_pos)
 
 
 COLOR_MAP = {
@@ -79,6 +195,10 @@ class PreviewPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pixmap_scale_factor = 1.0
+        self.zoom_factor = 1.0
+        self._min_zoom = 0.25
+        self._max_zoom = 8.0
+        self._zoom_step = 1.2
         self.current_settings = {}
         # Maintain a canonical ROI in image coordinates so it doesn't drift on resizes
         self._image_roi = None
@@ -105,32 +225,46 @@ class PreviewPanel(QWidget):
         image_and_bar_layout = QHBoxLayout()
         image_and_bar_layout.setSpacing(10)
 
-        # 1. IMAGE LABEL
-        # The main widget for displaying the preview image.
-        self.image_label = QLabel("Select a main directory to begin.")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.image_label.setStyleSheet("background-color: #323232; border: none;")
-        self.image_label.setMinimumSize(400, 500) 
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        
-        # Add the image label with a stretch factor so it takes up most of the space
-        image_and_bar_layout.addWidget(self.image_label, 1)
+        # 1. ZOOMABLE IMAGE VIEW (replaces scroll area + label)
+        self.image_view = ZoomableImageView()
+        self.image_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Keep ROI overlay in sync when panning via scrollbars
+        self.image_view.horizontalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
+        self.image_view.verticalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
+        image_and_bar_layout.addWidget(self.image_view, 1)
 
         # 2. COLOR BAR LABEL
         self.colorbar = LiveColorBar()
-        self.colorbar.setFixedWidth(60) # Wide enough for text like "20000"
+        self.colorbar.setFixedWidth(60)  # Wide enough for text like "20000"
         self.colorbar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         image_and_bar_layout.addWidget(self.colorbar, 0)
 
         # Add the horizontal layout to the main panel's vertical layout and let it take extra space
         top_level_layout.addLayout(image_and_bar_layout, 1)
 
-        # Add a stretch to the main vertical layout 
+        # 2a. ZOOM CONTROLS
+        zoom_layout = QHBoxLayout()
+        self.zoom_out_btn = QPushButton("-")
+        self.zoom_home_btn = QPushButton("Home")
+        self.zoom_in_btn = QPushButton("+")
+        self.zoom_out_btn.setFixedWidth(40)
+        self.zoom_in_btn.setFixedWidth(40)
+        self.zoom_home_btn.setFixedWidth(70)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_home_btn.clicked.connect(self.zoom_home)
+        zoom_layout.addWidget(self.zoom_out_btn)
+        zoom_layout.addWidget(self.zoom_home_btn)
+        zoom_layout.addWidget(self.zoom_in_btn)
+        zoom_layout.addStretch(1)
+        top_level_layout.addLayout(zoom_layout)
+
+        # Add a stretch to the main vertical layout
         # This pushes the entire image_and_bar_layout content to the top.
 
-        # The interactive ROI widget is a transparent overlay on the image_label.
-        self.roi_widget = InteractiveROI(self.image_label)
-        self.roi_widget.roiChanged.connect(self._on_roi_drawn) # Emits the raw widget rect
+        # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
+        self.roi_widget = InteractiveROI(self.image_view.viewport())
+        self.roi_widget.roiChanged.connect(self._on_roi_drawn)  # Emits the raw widget rect
         
         # 3. FILE INFO GROUP
         info_group = QGroupBox("Current Preview File")
@@ -168,31 +302,36 @@ class PreviewPanel(QWidget):
 
     def update_roi_display(self, roi: QRect):
         """Update the on-screen ROI overlay based on a given image-space ROI.
-        Also stores it as the canonical ROI to keep consistent across resizes.
+        Uses view mapping to handle zoom and pan correctly.
         """
         self._image_roi = QRect(roi) if roi is not None else None
-        if self.pixmap_scale_factor > 0 and self._image_roi is not None:
-            scaled_rect = QRect(
-                int(self._image_roi.x() / self.pixmap_scale_factor),
-                int(self._image_roi.y() / self.pixmap_scale_factor),
-                int(self._image_roi.width() / self.pixmap_scale_factor),
-                int(self._image_roi.height() / self.pixmap_scale_factor)
-            )
-            # Prevent emitting ROI-changed signals while we programmatically set it
-            self._suppress_roi_signal = True
-            try:
-                self.roi_widget.setRoi(scaled_rect)
-            finally:
-                self._suppress_roi_signal = False
+        if self._image_roi is None or not hasattr(self, 'image_view'):
+            return
+        # Map image-space ROI to viewport widget coordinates
+        tl_view = self.image_view.mapFromScene(QPointF(self._image_roi.topLeft()))
+        br_view = self.image_view.mapFromScene(QPointF(self._image_roi.bottomRight()))
+        widget_rect = QRect(tl_view, br_view)
+        # Clip to the viewport area
+        vp_rect = self.image_view.viewport().rect()
+        clipped = widget_rect.intersected(vp_rect)
+        self._suppress_roi_signal = True
+        try:
+            self.roi_widget.setRoi(clipped)
+        finally:
+            self._suppress_roi_signal = False
 
     def get_roi(self):
+        """Return ROI in image-space coordinates using view mapping."""
         widget_rect = self.roi_widget.roi_rect
-        return QRect(
-            int(widget_rect.x() * self.pixmap_scale_factor),
-            int(widget_rect.y() * self.pixmap_scale_factor),
-            int(widget_rect.width() * self.pixmap_scale_factor),
-            int(widget_rect.height() * self.pixmap_scale_factor)
-        )
+        if not hasattr(self, 'image_view'):
+            return QRect()
+        tl_scene = self.image_view.mapToScene(widget_rect.topLeft())
+        br_scene = self.image_view.mapToScene(widget_rect.bottomRight())
+        x = int(tl_scene.x())
+        y = int(tl_scene.y())
+        w = int(br_scene.x() - tl_scene.x())
+        h = int(br_scene.y() - tl_scene.y())
+        return QRect(x, y, w, h)
 
     def _on_roi_drawn(self, widget_rect):
         final_roi = self.get_roi()
@@ -228,8 +367,15 @@ class PreviewPanel(QWidget):
 
     def update_preview(self, pixmap: QPixmap, settings: dict):
         self.original_pixmap = pixmap
-        self.current_settings = settings # Store the settings
-        self._rescale_ui() # Trigger a full redraw
+        self.current_settings = settings  # Store the settings
+        if hasattr(self, 'image_view'):
+            if not self.image_view.has_image():
+                # First time: set and fit
+                self.image_view.set_pixmap(pixmap)
+            else:
+                # Subsequent updates (e.g., intensity/LUT changes): preserve zoom/center
+                self.image_view.update_pixmap(pixmap, preserve_center=True)
+        self._rescale_ui()  # Trigger a UI refresh (colorbar + overlay)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -242,47 +388,64 @@ class PreviewPanel(QWidget):
         self._resize_timer.start(150)
 
     def _rescale_ui(self):
-        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull():
+        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull() or not hasattr(self, 'image_view'):
             return
 
-        # Ensure we have a canonical image-space ROI stored once
-        if self._image_roi is None and hasattr(self, 'roi_widget') and self.pixmap_scale_factor > 0:
+        # Maintain canonical ROI once
+        if self._image_roi is None and hasattr(self, 'roi_widget'):
             try:
                 self._image_roi = self.get_roi()
             except Exception:
                 self._image_roi = None
-        scaled_pixmap = self.original_pixmap.scaled(
-            self.image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.image_label.setPixmap(scaled_pixmap)
 
-        # Generate and display the color bar ---
-        if self.current_settings and scaled_pixmap.height() > 0:
-            # 1. Force the color bar's container to match the actual image's height
-            self.colorbar.setFixedHeight(scaled_pixmap.height())
-            
-            # 2. Tell the color bar to update its internal contents
+        # Update color bar to match viewport height (visible image area)
+        if self.current_settings:
+            vp_h = max(1, self.image_view.viewport().height())
+            self.colorbar.setFixedHeight(vp_h)
             self.colorbar.update_values(
                 min_val=self.current_settings.get("min_intensity", 0),
                 max_val=self.current_settings.get("max_intensity", 1),
                 cmap_name=self.current_settings.get("lut", "nipy_spectral")
             )
 
-
-        # Update scale factor and ROI overlay geometry to match new pixmap size
-        if scaled_pixmap.width() > 0:
-            new_scale = self.original_pixmap.width() / scaled_pixmap.width()
-        else:
-            new_scale = 1.0
-        self.pixmap_scale_factor = new_scale
+        # Update scale factor and ROI overlay geometry to match viewport
+        try:
+            total_scale = self.image_view.total_scale()
+            self.pixmap_scale_factor = 1.0 / total_scale if total_scale > 0 else 1.0
+        except Exception:
+            self.pixmap_scale_factor = 1.0
 
         if hasattr(self, 'roi_widget'):
-            self.roi_widget.setGeometry(0, 0, scaled_pixmap.width(), scaled_pixmap.height())
-            # Reapply canonical image-space ROI to new widget scale
+            vp = self.image_view.viewport().rect()
+            self.roi_widget.setGeometry(vp)
+            # Reapply canonical image-space ROI to new mapping
             if self._image_roi is not None:
                 self.update_roi_display(self._image_roi)
+
+    # --- Zoom API ---
+    def zoom_in(self):
+        if hasattr(self, 'image_view'):
+            self.image_view.zoom_in()
+        self._rescale_ui()
+
+    def zoom_out(self):
+        if hasattr(self, 'image_view'):
+            self.image_view.zoom_out()
+        self._rescale_ui()
+
+    def zoom_home(self):
+        # Reset to default (fit-to-viewport)
+        if hasattr(self, 'image_view'):
+            self.image_view.zoom_home()
+        self._rescale_ui()
+
+    def _sync_overlay_to_view(self):
+        """Reposition ROI overlay to match current viewport and redraw ROI rectangle."""
+        if not hasattr(self, 'image_view') or not hasattr(self, 'roi_widget'):
+            return
+        self.roi_widget.setGeometry(self.image_view.viewport().rect())
+        if self._image_roi is not None:
+            self.update_roi_display(self._image_roi)
 
     def _on_resize_settled(self):
         """After resize ends, snap the ROI overlay exactly to settings panel values if available."""

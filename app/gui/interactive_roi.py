@@ -11,6 +11,7 @@ class InteractiveROI(QWidget):
     roiChanged = pyqtSignal(QRect)
 
     HANDLE_SIZE = 10 # Size of the resize handles
+    BORDER_THICKNESS = 8 # Clickable thickness around ROI edges for moving the ROI
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,9 +25,18 @@ class InteractiveROI(QWidget):
         self.drag_start_pos = QPoint()
         self.drag_start_rect = QRect()
 
-        # Make the widget transparent so the image behind it is visible
+    # Make the widget transparent so the image behind it is visible
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True) # Needed for cursor changes on hover
+
+    def _is_on_border(self, pos: QPoint) -> bool:
+        """Return True if 'pos' lies within a BORDER_THICKNESS band along ROI edges."""
+        r = QRect(self.roi_rect)
+        if r.isNull() or r.width() <= 0 or r.height() <= 0:
+            return False
+        inner = r.adjusted(self.BORDER_THICKNESS, self.BORDER_THICKNESS,
+                           -self.BORDER_THICKNESS, -self.BORDER_THICKNESS)
+        return r.contains(pos) and not inner.contains(pos)
 
     def setRoi(self, rect):
         """Public method to update the ROI from outside (e.g., from spinners)."""
@@ -71,14 +81,22 @@ class InteractiveROI(QWidget):
             self.drag_start_pos = event.pos()
             self.drag_start_rect = QRect(self.roi_rect)
 
+            # Prioritize handles (resize)
             for handle_name, handle_rect in self.handles.items():
                 if handle_rect.contains(event.pos()):
                     self.is_resizing = True
                     self.active_handle = handle_name
                     return
-            
-            if self.roi_rect.contains(event.pos()):
+
+            # Move only when grabbing the ROI border lines (not the interior)
+            if self._is_on_border(event.pos()):
                 self.is_moving = True
+                return
+
+            # Otherwise, let the underlying view handle (e.g., for panning)
+            event.ignore()
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         # Update cursor on hover
@@ -104,18 +122,33 @@ class InteractiveROI(QWidget):
             self.update() # Trigger repaint
         else:
             # Check for hover over handles to change cursor
+            over_handle = False
             for handle_name, handle_rect in self.handles.items():
                 if handle_rect.contains(event.pos()):
+                    over_handle = True
                     if handle_name in ['top-left', 'bottom-right']: cursor = Qt.CursorShape.SizeFDiagCursor
                     elif handle_name in ['top-right', 'bottom-left']: cursor = Qt.CursorShape.SizeBDiagCursor
                     elif handle_name in ['top', 'bottom']: cursor = Qt.CursorShape.SizeVerCursor
                     elif handle_name in ['left', 'right']: cursor = Qt.CursorShape.SizeHorCursor
                     break
-            else: # If not over a handle, check if over the main body
-                if self.roi_rect.contains(event.pos()):
+            if not over_handle:
+                # On the ROI border: indicate move (4-direction arrows)
+                if self._is_on_border(event.pos()):
                     cursor = Qt.CursorShape.SizeAllCursor
+                else:
+                    # Anywhere else: indicate panning is available behind
+                    # Show open hand normally, closed hand if dragging outside ROI
+                    if event.buttons() & Qt.MouseButton.LeftButton:
+                        # Let parent view handle drag for panning
+                        event.ignore()
+                        cursor = Qt.CursorShape.ClosedHandCursor
+                    else:
+                        cursor = Qt.CursorShape.OpenHandCursor
         
         self.setCursor(cursor)
+        # If we ignored the event to allow panning, don't accept further processing
+        if not (self.is_moving or self.is_resizing) and not over_handle and not self._is_on_border(event.pos()) and (event.buttons() & Qt.MouseButton.LeftButton):
+            return
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -124,3 +157,5 @@ class InteractiveROI(QWidget):
             self.is_moving = False
             self.is_resizing = False
             self.active_handle = None
+        else:
+            super().mouseReleaseEvent(event)
