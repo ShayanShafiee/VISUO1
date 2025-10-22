@@ -228,9 +228,6 @@ class PreviewPanel(QWidget):
         # 1. ZOOMABLE IMAGE VIEW (replaces scroll area + label)
         self.image_view = ZoomableImageView()
         self.image_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        # Keep ROI overlay in sync when panning via scrollbars
-        self.image_view.horizontalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
-        self.image_view.verticalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
         image_and_bar_layout.addWidget(self.image_view, 1)
 
         # 2. COLOR BAR LABEL
@@ -267,6 +264,46 @@ class PreviewPanel(QWidget):
         zoom_layout.addWidget(self.zoom_in_btn)
         zoom_layout.addStretch(1)
         top_level_layout.addLayout(zoom_layout)
+
+        # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
+        self.roi_widget = InteractiveROI(self.image_view.viewport())
+        self.roi_widget.roiChanged.connect(self._on_roi_drawn)  # Emits the raw widget rect
+        # Keep ROI overlay in sync when panning via scrollbars (connect after ROI exists)
+        self.image_view.horizontalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
+        self.image_view.verticalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
+
+        # 3. FILE INFO GROUP
+        info_group = QGroupBox("Current Preview File")
+        info_layout = QFormLayout(info_group)
+        info_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        info_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.wf_path_label = QLabel("N/A")
+        self.fl_path_label = QLabel("N/A")
+        for label in [self.wf_path_label, self.fl_path_label]:
+            label.setWordWrap(True)
+        info_layout.addRow("WF File:", self.wf_path_label)
+        info_layout.addRow("FL File:", self.fl_path_label)
+        top_level_layout.addWidget(info_group)
+
+        # 4. NAVIGATION BUTTONS
+        button_layout = QHBoxLayout()
+        self.prev_button = QPushButton("◀ Previous")
+        self.random_button = QPushButton("↻ Random")
+        self.next_button = QPushButton("▶ Next")
+        self.select_button = QPushButton("📂 Select Specific...")
+
+        self.prev_button.clicked.connect(self.requestPreviousImage.emit)
+        self.random_button.clicked.connect(self.requestNewRandomImage.emit)
+        self.next_button.clicked.connect(self.requestNextImage.emit)
+        self.select_button.clicked.connect(self._select_file)
+        
+        button_layout.addWidget(self.prev_button)
+        button_layout.addWidget(self.random_button)
+        button_layout.addWidget(self.next_button)
+        button_layout.addStretch(1)  # Pushes the "Select" button to the far right
+        button_layout.addWidget(self.select_button)
+        top_level_layout.addLayout(button_layout)
 
     def _make_zoom_icon(self, plus: bool = True) -> QIcon:
         """Create a magnifying-glass icon with + or - drawn programmatically (no external assets)."""
@@ -326,46 +363,7 @@ class PreviewPanel(QWidget):
         p.end()
         return QIcon(pm)
 
-        # Add a stretch to the main vertical layout
-        # This pushes the entire image_and_bar_layout content to the top.
-
-        # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
-        self.roi_widget = InteractiveROI(self.image_view.viewport())
-        self.roi_widget.roiChanged.connect(self._on_roi_drawn)  # Emits the raw widget rect
-        
-        # 3. FILE INFO GROUP
-        info_group = QGroupBox("Current Preview File")
-        info_layout = QFormLayout(info_group)
-        info_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        info_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-
-        self.wf_path_label = QLabel("N/A")
-        self.fl_path_label = QLabel("N/A")
-        for label in [self.wf_path_label, self.fl_path_label]:
-            label.setWordWrap(True)
-        info_layout.addRow("WF File:", self.wf_path_label)
-        info_layout.addRow("FL File:", self.fl_path_label)
-        top_level_layout.addWidget(info_group)
-        
-        # 3. NAVIGATION BUTTONS
-        # A horizontal layout for the Previous, Random, Next, and Select buttons.
-        button_layout = QHBoxLayout()
-        self.prev_button = QPushButton("◀ Previous")
-        self.random_button = QPushButton("↻ Random")
-        self.next_button = QPushButton("▶ Next")
-        self.select_button = QPushButton("📂 Select Specific...")
-
-        self.prev_button.clicked.connect(self.requestPreviousImage.emit)
-        self.random_button.clicked.connect(self.requestNewRandomImage.emit)
-        self.next_button.clicked.connect(self.requestNextImage.emit)
-        self.select_button.clicked.connect(self._select_file)
-        
-        button_layout.addWidget(self.prev_button)
-        button_layout.addWidget(self.random_button)
-        button_layout.addWidget(self.next_button)
-        button_layout.addStretch(1) # Pushes the "Select" button to the far right
-        button_layout.addWidget(self.select_button)
-        top_level_layout.addLayout(button_layout)
+        # Add a stretch to the main vertical layout (keeps content aligned to top)
 
     def update_roi_display(self, roi: QRect):
         """Update the on-screen ROI overlay based on a given image-space ROI.
@@ -375,8 +373,12 @@ class PreviewPanel(QWidget):
             # Defer ROI updates until the view settles to prevent visible jitter
             self._overlay_defer_timer.start(0)
             return
+        # Ensure required widgets exist before mapping
+        if not hasattr(self, 'image_view') or not hasattr(self, 'roi_widget'):
+            self._overlay_defer_timer.start(0)
+            return
         self._image_roi = QRect(roi) if roi is not None else None
-        if self._image_roi is None or not hasattr(self, 'image_view'):
+        if self._image_roi is None:
             return
         # Map image-space ROI to viewport widget coordinates
         tl_view = self.image_view.mapFromScene(QPointF(self._image_roi.topLeft()))
