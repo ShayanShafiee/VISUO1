@@ -10,8 +10,8 @@ class InteractiveROI(QWidget):
     # Signal emitted when the ROI rectangle is changed by the user.
     roiChanged = pyqtSignal(QRect)
 
-    HANDLE_SIZE = 10 # Size of the resize handles
-    BORDER_THICKNESS = 8 # Clickable thickness around ROI edges for moving the ROI
+    HANDLE_SIZE = 16 # Size of the resize handles (larger for easier grabbing)
+    BORDER_THICKNESS = 6 # Clickable thickness around ROI edges for moving the ROI
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,16 +24,63 @@ class InteractiveROI(QWidget):
         self.active_handle = None
         self.drag_start_pos = QPoint()
         self.drag_start_rect = QRect()
+        # Editable/active state similar to ROI selection behavior
+        self._active = False
+        # Outside mask opacity (alpha 0-255). Default ~50%
+        self._outside_alpha = 128
+        # Image bounds in viewport coords; when None, draw nothing
+        self._image_vp_rect = None
 
     # Make the widget transparent so the image behind it is visible
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True) # Needed for cursor changes on hover
+
+    # --- Public API ---
+    def setActive(self, active: bool):
+        """Enable or disable editing mode. When active, shows dashed outline and handles.
+        When inactive, shows a subtle semi-transparent rounded rectangle and ignores edits.
+        """
+        if self._active == active:
+            return
+        self._active = active
+        # When inactive, stop any ongoing drag and clear state
+        if not self._active:
+            self.is_moving = False
+            self.is_resizing = False
+            self.active_handle = None
+        self.update()
+    
+    def isActive(self) -> bool:
+        return self._active
+
+    def setOutsideOpacity(self, percent: int):
+        """Set outside dimming opacity as a percentage (0-100)."""
+        try:
+            p = max(0, min(100, int(percent)))
+        except Exception:
+            p = 50
+        self._outside_alpha = int(round(p * 255 / 100))
+        self.update()
+
+    def setImageRect(self, rect):
+        """Define the image area in viewport coordinates. Pass None to disable drawing."""
+        if rect is None:
+            self._image_vp_rect = None
+        else:
+            self._image_vp_rect = QRect(rect)
+        self.update()
 
     def _is_on_border(self, pos: QPoint) -> bool:
         """Return True if 'pos' lies within a BORDER_THICKNESS band along ROI edges."""
         r = QRect(self.roi_rect)
         if r.isNull() or r.width() <= 0 or r.height() <= 0:
             return False
+        # Avoid treating near-handle regions as border to prioritize resizing
+        for handle_rect in self.handles.values():
+            # Inflate the handle area for easier detection
+            hr = QRect(handle_rect).adjusted(-4, -4, 4, 4)
+            if hr.contains(pos):
+                return False
         inner = r.adjusted(self.BORDER_THICKNESS, self.BORDER_THICKNESS,
                            -self.BORDER_THICKNESS, -self.BORDER_THICKNESS)
         return r.contains(pos) and not inner.contains(pos)
@@ -62,19 +109,71 @@ class InteractiveROI(QWidget):
         }
 
     def paintEvent(self, event):
-        """Draws the ROI rectangle and its handles."""
+        """Draw the cropping window visualization with dimmed outside area.
+        - Outside ROI: semi-transparent black wash (slightly more opaque).
+        - Inside ROI: fully clear (so the image is visible) by shading only the bands outside the ROI.
+        - Border: rounded corners; dashed when active; solid when inactive.
+        - Handles: only when active.
+        """
+        # If no image bounds are known, draw nothing (hide effect)
+        if self._image_vp_rect is None:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Draw the main ROI rectangle
-        pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.SolidLine)
-        painter.setPen(pen)
-        painter.drawRect(self.roi_rect)
+        # 1) Prepare geometry
+        outside_color = QColor(0, 0, 0, self._outside_alpha)  # black with adjustable opacity
+        # Only consider the image area (not the entire viewport)
+        img_rect = self._image_vp_rect.intersected(self.rect())
+        if img_rect.isNull():
+            return
+        roi_in_img = self.roi_rect.intersected(img_rect)
 
-        # Draw the resize handles
-        painter.setBrush(QBrush(QColor(0, 255, 0, 200)))
-        for handle in self.handles.values():
-            painter.drawRect(handle)
+        # 2) Shade outside bands only (top, bottom, left, right around ROI)
+        # If ROI doesn't intersect image, shade the entire image area
+        if roi_in_img.isNull():
+            painter.fillRect(img_rect, outside_color)
+        else:
+            # Top band
+            if roi_in_img.top() > img_rect.top():
+                top_band = QRect(img_rect.left(), img_rect.top(), img_rect.width(), roi_in_img.top() - img_rect.top())
+                painter.fillRect(top_band, outside_color)
+            # Bottom band
+            if roi_in_img.bottom() < img_rect.bottom():
+                bottom_band = QRect(img_rect.left(), roi_in_img.bottom() + 1, img_rect.width(), img_rect.bottom() - roi_in_img.bottom())
+                painter.fillRect(bottom_band, outside_color)
+            # Left band
+            if roi_in_img.left() > img_rect.left():
+                left_band = QRect(img_rect.left(), roi_in_img.top(), roi_in_img.left() - img_rect.left(), roi_in_img.height())
+                painter.fillRect(left_band, outside_color)
+            # Right band
+            if roi_in_img.right() < img_rect.right():
+                right_band = QRect(roi_in_img.right() + 1, roi_in_img.top(), img_rect.right() - roi_in_img.right(), roi_in_img.height())
+                painter.fillRect(right_band, outside_color)
+
+        # 3) Draw border around the ROI
+        radius = 8
+        border_color = QColor(235, 235, 235, 220)
+        pen = QPen(border_color)
+        if self._active:
+            pen.setStyle(Qt.PenStyle.DotLine)
+            pen.setWidth(3)
+        else:
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if not roi_in_img.isNull():
+            # Clip border drawing within image bounds
+            painter.setClipRect(img_rect)
+            painter.drawRoundedRect(self.roi_rect, radius, radius)
+
+        # 4) Draw the resize handles only when active
+        if self._active:
+            painter.setClipRect(img_rect)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            for handle in self.handles.values():
+                painter.drawRect(handle)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -83,17 +182,26 @@ class InteractiveROI(QWidget):
 
             # Prioritize handles (resize)
             for handle_name, handle_rect in self.handles.items():
-                if handle_rect.contains(event.pos()):
+                # Inflate handle hit target for better responsiveness
+                hr = QRect(handle_rect).adjusted(-4, -4, 4, 4)
+                if hr.contains(event.pos()):
+                    # If not active yet, activate and begin resize
+                    if not self._active:
+                        self.setActive(True)
                     self.is_resizing = True
                     self.active_handle = handle_name
                     return
 
-            # Move only when grabbing the ROI border lines (not the interior)
-            if self._is_on_border(event.pos()):
+            # If inside ROI (interior or border), start moving
+            if self.roi_rect.contains(event.pos()):
+                if not self._active:
+                    self.setActive(True)
                 self.is_moving = True
                 return
 
-            # Otherwise, let the underlying view handle (e.g., for panning)
+            # Otherwise (outside ROI), deactivate and let the view handle panning/selection
+            if self._active:
+                self.setActive(False)
             event.ignore()
             return
         super().mousePressEvent(event)
@@ -107,6 +215,17 @@ class InteractiveROI(QWidget):
             if self.is_moving:
                 cursor = Qt.CursorShape.SizeAllCursor
                 self.roi_rect = self.drag_start_rect.translated(delta)
+                # If user steers over a handle while moving, switch to resizing on-the-fly
+                for handle_name, handle_rect in self.handles.items():
+                    hr = QRect(handle_rect).adjusted(-4, -4, 4, 4)
+                    if hr.contains(event.pos()):
+                        self.is_moving = False
+                        self.is_resizing = True
+                        self.active_handle = handle_name
+                        # restart drag baseline from current pos/rect for a smooth transition
+                        self.drag_start_pos = event.pos()
+                        self.drag_start_rect = QRect(self.roi_rect)
+                        break
             elif self.is_resizing:
                 temp_rect = QRect(self.drag_start_rect)
                 if 'left' in self.active_handle: temp_rect.setLeft(self.drag_start_rect.left() + delta.x())
@@ -120,6 +239,11 @@ class InteractiveROI(QWidget):
 
             self._update_handles()
             self.update() # Trigger repaint
+            # Emit live updates so the canonical image-space ROI stays current
+            try:
+                self.roiChanged.emit(self.roi_rect)
+            except Exception:
+                pass
         else:
             # Check for hover over handles to change cursor
             over_handle = False

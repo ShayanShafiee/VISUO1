@@ -6,7 +6,7 @@ import re
 import csv
 import numpy as np
 import logging 
-from PyQt6.QtCore import QObject, pyqtSignal, QRect
+from PyQt6.QtCore import QObject, pyqtSignal, QRect, QThread
 from tifffile import imread, imwrite
 import cv2
 
@@ -39,6 +39,7 @@ class Worker(QObject):
         self.roi = (roi.x(), roi.y(), roi.width(), roi.height())
         self.output_dir = output_dir
         self.is_running = True
+        self._paused = False
         self.features_to_extract = self.settings.get("selected_features_list", [])
 
     def run(self):
@@ -72,6 +73,10 @@ class Worker(QObject):
 
             # --- Step 2: Main Processing Loop ---
             for i, (animal_key, time_data) in enumerate(self.grouped_data.items()):
+                if not self.is_running:
+                    self.status.emit("Processing cancelled.")
+                    return
+                self._maybe_wait_if_paused()
                 if not self.is_running: return
                 self.status.emit(f"Processing animal: {animal_key} ({i+1}/{total_animals})")
 
@@ -98,6 +103,10 @@ class Worker(QObject):
 
                 base_filename = animal_key
                 for idx, time_point in enumerate(time_points_to_collate):
+                    if not self.is_running:
+                        self.status.emit("Processing cancelled.")
+                        return
+                    self._maybe_wait_if_paused()
                     final_wf, final_fl = None, None # To hold the final processed images for this timepoint
 
                     # Check if we have data for this time point
@@ -163,6 +172,10 @@ class Worker(QObject):
                 # --- ALL LOOPS ARE DONE, NOW PERFORM POST-PROCESSING ---
 
                 # --- 1. Perform Signal Path Analysis and Save Maps ---
+                if not self.is_running:
+                    self.status.emit("Processing cancelled.")
+                    return
+                self._maybe_wait_if_paused()
                 if enable_signal_path and processed_time_series_data:
                     self.status.emit(f"Analyzing signal path for {animal_key}...")
                     path_threshold = self.settings.get("signal_path_threshold", 7500)
@@ -172,10 +185,10 @@ class Worker(QObject):
                     time_points_int = [int(tp) for tp in time_points_to_collate]
 
                     footprint, final_maps, features = analyze_signal_path(
-                        processed_time_series_data, path_threshold, transparency, 
+                        processed_time_series_data, path_threshold, transparency,
                         phase1, phase2, time_points_int
                     )
-                    
+
                     if features:
                         features['animal_key'] = animal_key
                         features['group_name'] = group_name
@@ -191,6 +204,9 @@ class Worker(QObject):
                             imwrite(os.path.join(path_output_dir, f"{animal_key}_{map_name}_map.tif"), map_image)
                 
                 # --- 2. Create and Save Animation ---
+                if not self.is_running:
+                    self.status.emit("Processing cancelled.")
+                    return
                 if collage_images:
                     anim_output_dir = os.path.join(self.output_dir, group_name, "gifs")
                     os.makedirs(anim_output_dir, exist_ok=True)
@@ -230,6 +246,7 @@ class Worker(QObject):
                 if not self.is_running:
                     self.status.emit("Processing cancelled.")
                     return
+                self._maybe_wait_if_paused()
                 self.status.emit(f"Creating master collage for group: {group_name}")
                 if not collages: continue
                 header_row = collages[0].copy()
@@ -307,6 +324,9 @@ class Worker(QObject):
                 self.featureCsvReady.emit(csv_output_path)
 
             # Ensure the final CSV saving for signal path is present ---
+            if not self.is_running:
+                self.status.emit("Processing cancelled.")
+                return
             if enable_signal_path and all_signal_path_results:
                 self.status.emit("Saving signal path analysis results...")
                 path_df = pd.DataFrame(all_signal_path_results)
@@ -327,3 +347,18 @@ class Worker(QObject):
 
     def stop(self):
         self.is_running = False
+        # In case paused, ensure we can exit the pause loop
+        self._paused = False
+    
+    def pause(self):
+        """Pause the worker's processing loop at safe checkpoints."""
+        self._paused = True
+
+    def resume(self):
+        """Resume processing if previously paused."""
+        self._paused = False
+
+    def _maybe_wait_if_paused(self):
+        """Block the worker thread in short sleeps while paused, remaining responsive to abort."""
+        while self._paused and self.is_running:
+            QThread.msleep(50)

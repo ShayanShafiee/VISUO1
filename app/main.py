@@ -84,18 +84,16 @@ def create_lock_file():
 SHOW_SPLASH_SCREEN = True
 
 if __name__ == '__main__':
-    # --- MODIFIED: Create QApplication FIRST ---
     # This is essential for the QMessageBox to work.
     app = QApplication(sys.argv)
 
-    # --- MODIFIED: New single-instance workflow ---
+    # New single-instance workflow ---
     if not check_for_previous_instance():
         # User cancelled, so exit cleanly.
         sys.exit(0)
     
     # If we got here, it's safe to launch. Create the lock file.
     create_lock_file()
-    # --- END MODIFICATION ---
 
     app.setApplicationName("VISUO1")
     try:

@@ -5,7 +5,7 @@ import os
 import cv2
 from matplotlib import colormaps
 from tifffile import imwrite
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import imageio
 
 
@@ -360,3 +360,93 @@ def create_phase_colorbar(height: int) -> np.ndarray:
         y_pos += color_box_h + (margin // 2)
 
     return colorbar
+
+# --- Animal outline helpers (for preview and pipeline reuse) ---
+
+def compute_animal_outline(
+    image: np.ndarray,
+    method: str = 'otsu',
+    threshold: Optional[int] = None,
+    otsu_boost_percent: int = 10
+) -> Optional[np.ndarray]:
+    """
+    Compute the largest external contour of the animal from a single-channel image.
+    - If 'threshold' is provided, apply a binary threshold (image >= threshold).
+    - If no contour is found (or no threshold provided), fall back to Otsu on an 8-bit normalized image,
+      then increase the threshold by ~10% to get a tighter outline.
+
+    Returns:
+        contour (Nx1x2 or Nx2) in image pixel coordinates, or None if not found.
+    """
+    if image is None:
+        return None
+    # Ensure 2D single channel
+    img = image
+    if img.ndim == 3:
+        # Handle color or multi-frame stacks
+        if img.shape[-1] in (3, 4) and img.shape[0] not in (3, 4):
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        elif img.shape[0] > 1:
+            img = np.max(img, axis=0)
+        else:
+            img = img.squeeze()
+    method = (method or 'otsu').lower()
+    contours = None
+    if method == 'manual':
+        if threshold is None:
+            return None
+        try:
+            # Speed-up: work at reduced resolution for very large images, then scale back
+            h, w = img.shape[:2]
+            scale = 1.0
+            max_dim = max(h, w)
+            if max_dim >= 4096:
+                scale = 0.25
+            elif max_dim >= 2048:
+                scale = 0.5
+            if scale < 1.0:
+                small_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                small_img = cv2.resize(img, small_size, interpolation=cv2.INTER_AREA)
+                small_mask = (small_img >= threshold).astype(np.uint8) * 255
+                contours, _ = cv2.findContours(small_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    best = max(contours, key=cv2.contourArea)
+                    # Scale contour coordinates back to original image space
+                    best = (best.astype(np.float32) / scale).astype(np.int32)
+                    return best
+            # Fallback or small images: full-res
+            mask = (img >= threshold).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                return max(contours, key=cv2.contourArea)
+        except Exception:
+            return None
+        return None
+    elif method == 'otsu':
+        try:
+            img8 = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            otsu_val, _ = cv2.threshold(img8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            boost = max(0, int(otsu_boost_percent))
+            aggressive = min(255, int(otsu_val * (1.0 + (boost / 100.0))))
+            _, mask2 = cv2.threshold(img8, aggressive, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(mask2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                return max(contours, key=cv2.contourArea)
+        except Exception:
+            return None
+        return None
+    else:
+        # Unknown method; default to None
+        return None
+
+def draw_outline_on_image(rgb_image: np.ndarray, contour: np.ndarray, color_rgb: Tuple[int, int, int], thickness: int = 3) -> np.ndarray:
+    """
+    Draw a single contour on an RGB image. The color should be in (R,G, B) order.
+    Returns a modified copy; original is not altered.
+    """
+    if rgb_image is None or contour is None:
+        return rgb_image
+    out = rgb_image.copy()
+    # OpenCV drawContours does not care about color space; ensure we pass the tuple matching array channel order (RGB here)
+    cv2.drawContours(out, [contour], -1, color_rgb, thickness)
+    return out

@@ -6,11 +6,14 @@ import numpy as np
 from processing.image_processor import create_gradient_image
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLayout, QApplication,
                              QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
-                             QGraphicsView, QGraphicsScene)
+                             QGraphicsView, QGraphicsScene, QInputDialog)
 from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF, QSize
 
 from .interactive_roi import InteractiveROI
+from .roi_manager import ROIManager, ROI
+from .multi_roi_overlay import MultiROIOverlay
+from .outline_overlay import OutlineOverlay
 
 
 class ZoomableImageView(QGraphicsView):
@@ -186,6 +189,8 @@ class PreviewPanel(QWidget):
     requestPreviousImage = pyqtSignal()
     requestNextImage = pyqtSignal()
     roiChangedFromDrawing = pyqtSignal(QRect)
+    roiListUpdated = pyqtSignal(list)  # list of dict summaries
+    activeRoiChanged = pyqtSignal(int)  # id of newly active ROI
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -208,6 +213,8 @@ class PreviewPanel(QWidget):
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._on_resize_settled)
+        # ROI clipboard for copy/paste
+        self._roi_clipboard = None
 
         self._init_ui()
 
@@ -234,6 +241,8 @@ class PreviewPanel(QWidget):
         self.colorbar = LiveColorBar()
         self.colorbar.setFixedWidth(60)  # Wide enough for text like "20000"
         self.colorbar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Hide colorbar until an image is actually loaded
+        self.colorbar.setVisible(False)
         image_and_bar_layout.addWidget(self.colorbar, 0)
 
         # Add the horizontal layout to the main panel's vertical layout and let it take extra space
@@ -265,12 +274,44 @@ class PreviewPanel(QWidget):
         zoom_layout.addStretch(1)
         top_level_layout.addLayout(zoom_layout)
 
-        # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
+        # Multi-ROI layer (annotations)
+        self.roi_manager = ROIManager()
+        self.multi_roi_overlay = MultiROIOverlay(self.image_view.viewport(), self.image_view, self.roi_manager)
+        self.multi_roi_overlay.setGeometry(self.image_view.viewport().rect())
+        # Keep main panel in sync when user edits ROI geometry in overlay
+        self.multi_roi_overlay.geometryChanged.connect(self._on_multi_roi_geometry_changed)
+        # When overlay selection changes (including deselect), update active ROI
+        try:
+            self.multi_roi_overlay.activeRoiChanged.connect(self._on_overlay_active_roi_changed)
+        except Exception:
+            pass
+
+        # Animal Outline passive overlay (below ROI overlay, above crop shading)
+        self.outline_overlay = OutlineOverlay(self.image_view.viewport(), self.image_view)
+        self.outline_overlay.setGeometry(self.image_view.viewport().rect())
+
+    # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
         self.roi_widget = InteractiveROI(self.image_view.viewport())
         self.roi_widget.roiChanged.connect(self._on_roi_drawn)  # Emits the raw widget rect
+        # Hide crop overlay until an image is loaded
+        self.roi_widget.setVisible(False)
+        # Allow ROI overlay to forward events to cropping widget when not editing ROI
+        try:
+            self.multi_roi_overlay.set_crop_widget(self.roi_widget)
+        except Exception:
+            pass
         # Keep ROI overlay in sync when panning via scrollbars (connect after ROI exists)
         self.image_view.horizontalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
         self.image_view.verticalScrollBar().valueChanged.connect(self._sync_overlay_to_view)
+        # Keep ROI overlay on top to allow selection-by-edge even when no ROI is active;
+        # overlay forwards non-ROI interactions to the cropping widget
+        # Layer order: image < roi_widget (shading) < outline_overlay < multi_roi_overlay
+        try:
+            self.roi_widget.lower()
+            self.outline_overlay.raise_()
+            self.multi_roi_overlay.raise_()
+        except Exception:
+            self.multi_roi_overlay.raise_()
 
         # 3. FILE INFO GROUP
         info_group = QGroupBox("Current Preview File")
@@ -447,9 +488,27 @@ class PreviewPanel(QWidget):
                 if not self.image_view.has_image():
                     # First time: set and fit
                     self.image_view.set_pixmap(pixmap)
+                    # Show colorbar now that an image exists
+                    self.colorbar.setVisible(True)
                 else:
                     # Subsequent updates (e.g., intensity/LUT changes): preserve zoom/center
                     self.image_view.update_pixmap(pixmap, preserve_center=True)
+            # Show/hide cropping overlay based on settings and update mask opacity
+            try:
+                show_crop = bool(self.current_settings.get("show_crop_overlay", True))
+                if hasattr(self, 'roi_widget'):
+                    # Only show when an image is present
+                    self.roi_widget.setVisible(show_crop and self.image_view.has_image())
+                    if hasattr(self.roi_widget, 'setOutsideOpacity'):
+                        opacity_pct = int(self.current_settings.get("crop_mask_opacity", 50))
+                        self.roi_widget.setOutsideOpacity(opacity_pct)
+            except Exception:
+                pass
+            # Update outline overlay (visibility/color/threshold/source) and recompute if needed
+            try:
+                self._apply_outline_settings()
+            except Exception:
+                pass
             # Update colorbar and schedule overlay sync once
             self._rescale_ui()
         finally:
@@ -468,15 +527,15 @@ class PreviewPanel(QWidget):
         self._resize_timer.start(150)
 
     def _rescale_ui(self):
-        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull() or not hasattr(self, 'image_view'):
+        if not hasattr(self, 'image_view'):
+            return
+        # Toggle colorbar visibility based on whether an image is loaded
+        has_img = self.image_view.has_image() and hasattr(self, 'original_pixmap') and not self.original_pixmap.isNull()
+        if hasattr(self, 'colorbar'):
+            self.colorbar.setVisible(bool(has_img))
+        if not has_img:
             return
 
-        # Maintain canonical ROI once
-        if self._image_roi is None and hasattr(self, 'roi_widget'):
-            try:
-                self._image_roi = self.get_roi()
-            except Exception:
-                self._image_roi = None
 
         # Update color bar to match viewport height (visible image area)
         if self.current_settings:
@@ -497,10 +556,23 @@ class PreviewPanel(QWidget):
 
         if hasattr(self, 'roi_widget'):
             vp = self.image_view.viewport().rect()
+            # Resize overlays to match viewport
+            if hasattr(self, 'multi_roi_overlay'):
+                self.multi_roi_overlay.setGeometry(vp)
             self.roi_widget.setGeometry(vp)
+            if hasattr(self, 'outline_overlay'):
+                self.outline_overlay.setGeometry(vp)
+            # Constrain crop shading to image bounds within the viewport
+            self._update_crop_image_rect()
             # Reapply canonical image-space ROI to new mapping
             if self._image_roi is not None:
                 self.update_roi_display(self._image_roi)
+        # Remap outline to viewport coordinates after UI rescale
+        try:
+            if hasattr(self, 'outline_overlay'):
+                self.outline_overlay.remap_to_viewport()
+        except Exception:
+            pass
 
     # --- Zoom API ---
     def zoom_in(self):
@@ -527,25 +599,248 @@ class PreviewPanel(QWidget):
             return
         if not hasattr(self, 'image_view') or not hasattr(self, 'roi_widget'):
             return
-        self.roi_widget.setGeometry(self.image_view.viewport().rect())
+        vp = self.image_view.viewport().rect()
+        if hasattr(self, 'multi_roi_overlay'):
+            self.multi_roi_overlay.setGeometry(vp)
+            self.multi_roi_overlay.update()
+        self.roi_widget.setGeometry(vp)
+        if hasattr(self, 'outline_overlay'):
+            self.outline_overlay.setGeometry(vp)
+            try:
+                self.outline_overlay.remap_to_viewport()
+            except Exception:
+                pass
+        # Update crop shading area to align with current image position/zoom
+        self._update_crop_image_rect()
         if self._image_roi is not None:
             self.update_roi_display(self._image_roi)
 
+    def _update_crop_image_rect(self):
+        """Compute the image's rectangle in viewport coordinates and pass it to the crop overlay.
+        Ensures the shaded area only covers the image, not the entire viewport.
+        Hides the crop overlay when no image is loaded.
+        """
+        try:
+            if not hasattr(self, 'image_view') or not hasattr(self, 'roi_widget'):
+                return
+            if not self.image_view.has_image():
+                # No image: disable crop mask region and hide overlay
+                try:
+                    self.roi_widget.setImageRect(None)
+                except Exception:
+                    pass
+                self.roi_widget.setVisible(False)
+                return
+            # Map scene (0,0,w,h) to viewport to get where the image lies visually
+            scene_rect = self.image_view.scene().sceneRect()
+            tl = self.image_view.mapFromScene(QPointF(scene_rect.topLeft()))
+            br = self.image_view.mapFromScene(QPointF(scene_rect.bottomRight()))
+            img_rect = QRect(tl, br).normalized()
+            # Intersect with viewport bounds for safety
+            img_rect = img_rect.intersected(self.image_view.viewport().rect())
+            try:
+                self.roi_widget.setImageRect(img_rect)
+            except Exception:
+                pass
+            # Respect current setting for visibility
+            show_crop = bool(self.current_settings.get("show_crop_overlay", True)) if self.current_settings else True
+            self.roi_widget.setVisible(show_crop)
+        except Exception:
+            # Fail-safe: don't crash UI on mapping errors
+            pass
+
+    def _apply_outline_settings(self):
+        if not hasattr(self, 'outline_overlay'):
+            return
+        # Read settings with defaults
+        show = bool(self.current_settings.get("show_animal_outline", False)) if self.current_settings else False
+        color_val = self.current_settings.get("animal_outline_color", (0, 255, 0, 255)) if self.current_settings else (0, 255, 0, 255)
+        if isinstance(color_val, (tuple, list)) and len(color_val) >= 3:
+            color = QColor(int(color_val[0]), int(color_val[1]), int(color_val[2]))
+        elif isinstance(color_val, str) and color_val.startswith('#'):
+            color = QColor(color_val)
+        else:
+            color = QColor(0, 255, 0)
+        thresh = int(self.current_settings.get("animal_outline_threshold", 5000)) if self.current_settings else 5000
+        source = str(self.current_settings.get("animal_outline_source", 'WF')) if self.current_settings else 'WF'
+        # Update image paths and params
+        self.outline_overlay.set_image_paths(getattr(self, '_wf_path', None), getattr(self, '_fl_path', None))
+        self.outline_overlay.set_params(visible=show, color=color, threshold=thresh, source=source)
+        # Recompute/mapping
+        self.outline_overlay.update_outline()
+
+    # --- Multi-ROI Management API ---
+    def add_rectangle_roi(self):
+        """Add a rectangle ROI centered in the current view, with an auto name and color."""
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        # Determine a default rect: 30% of image size, centered in scene
+        scene_rect = self.image_view.scene().sceneRect()
+        iw, ih = scene_rect.width(), scene_rect.height()
+        rw, rh = int(iw * 0.3), int(ih * 0.3)
+        cx, cy = scene_rect.center().x(), scene_rect.center().y()
+        rect = QRect(int(cx - rw/2), int(cy - rh/2), rw, rh)
+        # Choose a color from a small palette cycling
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"ROI {len(self.roi_manager.rois)+1}"
+        roi = ROI(shape='rect', name=name, color=palette[idx], rect=rect)
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        # Make the new ROI active and bring overlay to front for immediate editing
+        self.set_active_roi(roi.id)
+        self.activeRoiChanged.emit(roi.id)
+
+    def set_roi_visibility(self, roi_id: int, visible: bool):
+        self.roi_manager.set_roi_visibility(roi_id, visible)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
+    def rename_roi(self, roi_id: int, new_name: str):
+        self.roi_manager.rename_roi(roi_id, new_name)
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
+    def remove_roi(self, roi_id: int):
+        self.roi_manager.remove_roi(roi_id)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
+    def change_roi_color(self, roi_id: int, color: QColor):
+        """Update the color of an ROI and refresh overlay + list."""
+        self.roi_manager.set_roi_color(roi_id, color)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
+    def set_active_roi(self, roi_id: int):
+        """Mark an ROI as active for interactive editing in the overlay.
+        Accepts -1 or None to clear selection.
+        """
+        # Normalize None/-1 to None
+        if roi_id is None or (isinstance(roi_id, int) and roi_id < 0):
+            norm_id = None
+        else:
+            norm_id = roi_id
+        try:
+            self.multi_roi_overlay.set_active_roi(norm_id)
+            # When an ROI is active, bring overlay to front; otherwise prioritize cropping window
+            # Always keep overlay on top; it forwards to cropping widget when needed
+            self.multi_roi_overlay.raise_()
+            # Deactivate cropping window editing when an ROI is active (ROI-like behavior symmetry)
+            if hasattr(self, 'roi_widget') and hasattr(self.roi_widget, 'setActive'):
+                self.roi_widget.setActive(False)
+        except Exception:
+            pass
+
+    def _on_overlay_active_roi_changed(self, roi_id):
+        """Propagate overlay selection changes to external listeners and adjust z-order."""
+        self.set_active_roi(roi_id)
+        try:
+            # Re-emit for MainWindow -> SettingsPanel selection sync
+            self.activeRoiChanged.emit(-1 if roi_id is None else roi_id)
+        except Exception:
+            pass
+
+    # --- Edit operations for ROIs ---
+    def select_next_roi(self):
+        if not self.roi_manager.rois:
+            return
+        current_id = self.multi_roi_overlay.get_active_roi_id() if hasattr(self.multi_roi_overlay, 'get_active_roi_id') else None
+        ids = [r.id for r in self.roi_manager.rois]
+        if current_id in ids:
+            idx = ids.index(current_id)
+            next_id = ids[(idx + 1) % len(ids)]
+        else:
+            next_id = ids[0]
+        self.set_active_roi(next_id)
+        try:
+            self.activeRoiChanged.emit(next_id)
+        except Exception:
+            pass
+
+    def copy_active_roi(self):
+        rid = self.multi_roi_overlay.get_active_roi_id() if hasattr(self.multi_roi_overlay, 'get_active_roi_id') else None
+        if rid is None:
+            return
+        roi = self.roi_manager.get_roi(rid)
+        if not roi:
+            return
+        # Shallow snapshot (color, rect, points, shape, label, name)
+        self._roi_clipboard = {
+            'shape': roi.shape,
+            'name': roi.name,
+            'color': QColor(roi.color),
+            'rect': QRect(roi.rect) if roi.rect else None,
+            'points': list(roi.points) if roi.points else None,
+            'label': roi.label if hasattr(roi, 'label') else None,
+        }
+
+    def cut_active_roi(self):
+        rid = self.multi_roi_overlay.get_active_roi_id() if hasattr(self.multi_roi_overlay, 'get_active_roi_id') else None
+        if rid is None:
+            return
+        self.copy_active_roi()
+        self.remove_roi(rid)
+
+    def paste_roi(self):
+        if not self._roi_clipboard:
+            return
+        data = self._roi_clipboard
+        # Offset pasted geometry a bit
+        rect = QRect(data['rect']) if data.get('rect') else None
+        if rect is not None:
+            rect.translate(10, 10)
+        new_name = f"Copy of {data['name']}" if data.get('name') else "ROI"
+        new_roi = ROI(
+            shape=data.get('shape', 'rect'),
+            name=new_name,
+            color=data.get('color', QColor('#64b5f6')),
+            rect=rect,
+            points=list(data['points']) if data.get('points') else None,
+        )
+        if hasattr(new_roi, 'label') and data.get('label'):
+            new_roi.label = data['label']
+        self.roi_manager.add_roi(new_roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        self.set_active_roi(new_roi.id)
+        try:
+            self.activeRoiChanged.emit(new_roi.id)
+        except Exception:
+            pass
+
+    def add_text_annotation(self):
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        text, ok = QInputDialog.getText(self, "Add Text Annotation", "Text:")
+        if not ok or not text.strip():
+            return
+        # Place at center of current scene viewport
+        scene_rect = self.image_view.scene().sceneRect()
+        cx, cy = int(scene_rect.center().x()), int(scene_rect.center().y())
+        rect = QRect(cx, cy, 1, 1)  # point-like anchor
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"Text {len(self.roi_manager.rois)+1}"
+        roi = ROI(shape='text', name=name, color=palette[idx], rect=rect)
+        roi.label = text.strip()
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+
+    def _on_multi_roi_geometry_changed(self, roi_id: int, rect: QRect):
+        """When user moves/resizes an ROI on the overlay, refresh the list for UI sync."""
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
     def _on_resize_settled(self):
         """After resize ends, snap the ROI overlay exactly to settings panel values if available."""
-        # Prefer explicit ROI from current settings if present
-        roi_from_settings = None
-        try:
-            if self.current_settings and isinstance(self.current_settings.get("roi"), (list, tuple)):
-                rx, ry, rw, rh = self.current_settings["roi"]
-                roi_from_settings = QRect(int(rx), int(ry), int(rw), int(rh))
-        except Exception:
-            roi_from_settings = None
-
-        if roi_from_settings is not None:
-            self.update_roi_display(roi_from_settings)
-        elif self._image_roi is not None:
-            # Fall back to the canonical image-space ROI if settings are not available
+        # Use the canonical image-space ROI as the single source of truth
+        if self._image_roi is not None:
             self.update_roi_display(self._image_roi)
 
     def set_file_info(self, wf_path: str, fl_path: str):
@@ -553,6 +848,15 @@ class PreviewPanel(QWidget):
         self.wf_path_label.setToolTip(wf_path)
         self.fl_path_label.setText(os.path.basename(fl_path))
         self.fl_path_label.setToolTip(fl_path)
+        # Track actual paths for overlays
+        self._wf_path = wf_path if wf_path and wf_path != 'N/A' else None
+        self._fl_path = fl_path if fl_path and fl_path != 'N/A' else None
+        try:
+            if hasattr(self, 'outline_overlay'):
+                self.outline_overlay.set_image_paths(self._wf_path, self._fl_path)
+                self.outline_overlay.update_outline()
+        except Exception:
+            pass
 
     def _select_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Select Image for Preview", "", "Tiff Files (*.tif *.tiff)")

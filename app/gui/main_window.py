@@ -9,7 +9,8 @@ import traceback
 import webbrowser 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QProgressBar, QLabel, QMessageBox,
-                             QFileDialog, QStatusBar, QGroupBox, QGridLayout, QLineEdit)
+                             QFileDialog, QStatusBar, QGroupBox, QGridLayout, QLineEdit,
+                             QScrollArea)
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QThread, QRect, pyqtSlot, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QPixmap, QImage, QAction 
@@ -21,7 +22,7 @@ from .settings_panel import SettingsPanel
 from .preview_panel import PreviewPanel
 from .worker import Worker
 from processing.file_handler import group_files, parse_filename
-from processing.image_processor import apply_lut, create_overlay
+from processing.image_processor import apply_lut, create_overlay, compute_animal_outline, draw_outline_on_image
 from .feature_selection_panel import FeatureSelectionPanel
 from .analysis_panel import AnalysisPanel
 from processing.timeseries_analysis import analyze_features
@@ -144,8 +145,24 @@ class MainWindow(QMainWindow):
 
         self.settings_file_path = None
 
+        # Processing outcome tracking
+        self._proc_error_message = None
+        self._proc_aborted = False
+        self._proc_stopped = False
+
+        # Guards to avoid spurious handlers on programmatic UI updates
+        self._suppress_dir_edit_handler = False
+        self._suppress_out_dir_edit_handler = False
+
         self._init_ui()
         self._connect_signals()
+        # Simple cache to avoid re-reading images from disk on every tiny UI change
+        self._preview_cache = {
+            'wf_path': None,
+            'fl_path': None,
+            'wf_image': None,
+            'fl_image': None,
+        }
         
     def _init_ui(self):
 
@@ -160,40 +177,84 @@ class MainWindow(QMainWindow):
         load_action.triggered.connect(self._load_settings)
         file_menu.addAction(load_action)
 
+        # --- Edit Menu ---
+        edit_menu = menu_bar.addMenu("&Edit")
+        select_action = QAction("&Select Next ROI", self)
+        select_action.triggered.connect(lambda: self.preview_panel.select_next_roi())
+        copy_action = QAction("&Copy ROI", self)
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.triggered.connect(lambda: self.preview_panel.copy_active_roi())
+        cut_action = QAction("Cu&t ROI", self)
+        cut_action.setShortcut("Ctrl+X")
+        cut_action.triggered.connect(lambda: self.preview_panel.cut_active_roi())
+        paste_action = QAction("&Paste ROI", self)
+        paste_action.setShortcut("Ctrl+V")
+        paste_action.triggered.connect(lambda: self.preview_panel.paste_roi())
+        add_text_action = QAction("Add &Text Annotation…", self)
+        add_text_action.triggered.connect(lambda: self.preview_panel.add_text_annotation())
+        edit_menu.addAction(select_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(copy_action)
+        edit_menu.addAction(cut_action)
+        edit_menu.addAction(paste_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(add_text_action)
+
+        # --- Settings Menu ---
+        settings_menu = menu_bar.addMenu("&Settings")
+        self.verbose_action = QAction("&Verbose Logging", self)
+        self.verbose_action.setCheckable(True)
+        self.verbose_action.setChecked(False)
+        self.verbose_action.toggled.connect(self._on_verbose_toggled)
+        settings_menu.addAction(self.verbose_action)
+
+        # --- Help Menu ---
+        help_menu = menu_bar.addMenu("&Help")
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
-        dir_group = QGroupBox("Directory Selection")
-        # Use a simple vertical layout for the group box
+
+        dir_group = QGroupBox("Paths")
+        # Compact the layout and controls to save vertical space
         dir_group_layout = QVBoxLayout(dir_group)
+        dir_group_layout.setContentsMargins(8, 6, 8, 6)
+        dir_group_layout.setSpacing(4)
 
         # Row 1: Input Directory
         input_dir_layout = QHBoxLayout()
-        self.dir_button = QPushButton("Select Main Data Directory...")
-        self.dir_button.setFixedWidth(220)
-        self.dir_label = QLineEdit("Not selected.") # Changed from QLabel
+        self.dir_button = QPushButton("Select Data…")
+        self.dir_button.setFixedWidth(160)
+        self.dir_label = QLineEdit("Not selected.")
         self.dir_label.setToolTip("Selected main data directory. You can also paste a path here.")
+        self.dir_label.setFixedHeight(26)
         input_dir_layout.addWidget(self.dir_button)
-        input_dir_layout.addWidget(self.dir_label) # Removed stretch factor, QLineEdit handles it
+        input_dir_layout.addWidget(self.dir_label)
         dir_group_layout.addLayout(input_dir_layout)
 
         # Row 2: Output Directory
         output_dir_layout = QHBoxLayout()
-        self.out_dir_button = QPushButton("Select Output Directory...")
-        self.out_dir_button.setFixedWidth(220)
-        self.out_dir_label = QLineEdit("Not selected.") # Changed from QLabel
+        self.out_dir_button = QPushButton("Select Output…")
+        self.out_dir_button.setFixedWidth(160)
+        self.out_dir_label = QLineEdit("Not selected.")
         self.out_dir_label.setToolTip("Selected output directory. You can also paste a path here.")
+        self.out_dir_label.setFixedHeight(26)
         output_dir_layout.addWidget(self.out_dir_button)
-        output_dir_layout.addWidget(self.out_dir_label) # Removed stretch factor
+        output_dir_layout.addWidget(self.out_dir_label)
         dir_group_layout.addLayout(output_dir_layout)
         
         main_layout.addWidget(dir_group)
         
         # The core_layout section ---
         core_layout = QHBoxLayout()
+        # Settings panel wrapped in a scroll area to keep the main layout fixed height
         self.settings_panel = SettingsPanel()
         self.settings_panel.setFixedWidth(350)
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidget(self.settings_panel)
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.settings_scroll.setFrameShape(self.settings_scroll.Shape.NoFrame)
 
         # Wrap PreviewPanel in a titled QGroupBox ---
         self.preview_panel = PreviewPanel()
@@ -208,18 +269,104 @@ class MainWindow(QMainWindow):
         self.analysis_panel = AnalysisPanel()
         self.analysis_panel.setFixedWidth(500)
         
-        core_layout.addWidget(self.settings_panel)
+        core_layout.addWidget(self.settings_scroll)
         core_layout.addWidget(preview_group, 1) # Add the group box instead of the panel directly
         core_layout.addWidget(self.feature_panel)
         core_layout.addWidget(self.analysis_panel)
         
         main_layout.addLayout(core_layout)
+
+        # --- Always-visible control bar (above the status bar) ---
+        footer = QWidget()
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 4, 8, 4)
+        footer_layout.setSpacing(8)
+
+        # Left: control buttons
+        self.control_start_btn = QPushButton("Start Processing")
+        self.control_start_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.control_start_btn.clicked.connect(self.run_processing)
+
+        self.control_pause_btn = QPushButton("Pause")
+        self.control_pause_btn.setStyleSheet("background-color: #FFA000; color: white; font-weight: bold;")
+        self.control_pause_btn.clicked.connect(self.pause_processing)
+
+        self.control_abort_btn = QPushButton("Abort")
+        self.control_abort_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold;")
+        self.control_abort_btn.clicked.connect(self.request_abort_processing)
+
+        self.control_resume_btn = QPushButton("Resume")
+        self.control_resume_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.control_resume_btn.clicked.connect(self.resume_processing)
+
+        self.control_stop_btn = QPushButton("Stop")
+        self.control_stop_btn.setStyleSheet("background-color: #9E9E9E; color: white; font-weight: bold;")
+        self.control_stop_btn.clicked.connect(self.stop_processing)
+
+        footer_layout.addWidget(self.control_start_btn)
+        footer_layout.addWidget(self.control_pause_btn)
+        footer_layout.addWidget(self.control_abort_btn)
+        footer_layout.addWidget(self.control_resume_btn)
+        footer_layout.addWidget(self.control_stop_btn)
+
+        footer_layout.addStretch(1)
+
+        # Right: progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        self.progress_bar.setFixedHeight(16)
+        footer_layout.addWidget(self.progress_bar)
+
+        main_layout.addWidget(footer)
 
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage("Ready.")
+        # Initialize footer control visibility to idle state
+        self._enter_idle_controls()
+
+    # --- Footer control state helpers ---
+    def _enter_idle_controls(self):
+        if hasattr(self, 'control_start_btn'):
+            self.control_start_btn.setVisible(True)
+        if hasattr(self, 'control_pause_btn'):
+            self.control_pause_btn.setVisible(False)
+        if hasattr(self, 'control_abort_btn'):
+            self.control_abort_btn.setVisible(False)
+        if hasattr(self, 'control_resume_btn'):
+            self.control_resume_btn.setVisible(False)
+        if hasattr(self, 'control_stop_btn'):
+            self.control_stop_btn.setVisible(False)
+
+    def _enter_processing_controls(self):
+        if hasattr(self, 'control_start_btn'):
+            self.control_start_btn.setVisible(False)
+        if hasattr(self, 'control_pause_btn'):
+            self.control_pause_btn.setVisible(True)
+        if hasattr(self, 'control_abort_btn'):
+            self.control_abort_btn.setVisible(True)
+        if hasattr(self, 'control_resume_btn'):
+            self.control_resume_btn.setVisible(False)
+        if hasattr(self, 'control_stop_btn'):
+            self.control_stop_btn.setVisible(False)
+
+    def _enter_paused_controls(self):
+        if hasattr(self, 'control_start_btn'):
+            self.control_start_btn.setVisible(False)
+        if hasattr(self, 'control_pause_btn'):
+            self.control_pause_btn.setVisible(False)
+        if hasattr(self, 'control_abort_btn'):
+            self.control_abort_btn.setVisible(False)
+        if hasattr(self, 'control_resume_btn'):
+            self.control_resume_btn.setVisible(True)
+        if hasattr(self, 'control_stop_btn'):
+            self.control_stop_btn.setVisible(True)
+
+    def _on_verbose_toggled(self, checked: bool):
+        try:
+            if hasattr(self, 'settings_panel') and hasattr(self.settings_panel, 'set_verbose_logging'):
+                self.settings_panel.set_verbose_logging(bool(checked))
+        except Exception:
+            pass
 
     def _connect_signals(self):
         """Connects all signals from child widgets to the main window's slots."""
@@ -235,9 +382,18 @@ class MainWindow(QMainWindow):
         self.settings_panel.settingsChanged.connect(self.update_live_preview)
         self.settings_panel.templatePathChanged.connect(self.load_template_image)
         self.settings_panel.startProcessing.connect(self.run_processing)
+        # New processing control signals
+        try:
+            self.settings_panel.pauseRequested.connect(self.pause_processing)
+            self.settings_panel.resumeRequested.connect(self.resume_processing)
+            self.settings_panel.abortRequested.connect(self.request_abort_processing)
+            self.settings_panel.stopRequested.connect(self.stop_processing)
+        except Exception:
+            pass
         
         # --- Preview Panel Navigation Connections ---
-        self.preview_panel.requestNewRandomImage.connect(self.load_random_preview_image)
+        # Only honor random loads when explicitly user-initiated; pass force=True via lambda
+        self.preview_panel.requestNewRandomImage.connect(lambda: self.load_random_preview_image(force=True))
         self.preview_panel.requestSpecificImage.connect(self.load_specific_preview_image)
         self.preview_panel.requestPreviousImage.connect(self.load_previous_preview_image)
         self.preview_panel.requestNextImage.connect(self.load_next_preview_image)
@@ -245,6 +401,28 @@ class MainWindow(QMainWindow):
         # --- Two-Way ROI Connections between Settings and Preview Panels ---
         self.preview_panel.roiChangedFromDrawing.connect(self.settings_panel.update_spinners_from_roi)
         self.settings_panel.roiChangedFromSpinners.connect(self.preview_panel.update_roi_display)
+
+        # --- Multi-ROI wiring (Annotations) ---
+        self.settings_panel.addRectangleRoiRequested.connect(self.preview_panel.add_rectangle_roi)
+        self.settings_panel.renameRoiRequested.connect(self.preview_panel.rename_roi)
+        self.settings_panel.removeRoiRequested.connect(self.preview_panel.remove_roi)
+        self.settings_panel.toggleRoiVisibilityRequested.connect(self.preview_panel.set_roi_visibility)
+        self.settings_panel.changeRoiColorRequested.connect(self.preview_panel.change_roi_color)
+        self.preview_panel.roiListUpdated.connect(self.settings_panel.update_roi_list)
+        self.settings_panel.selectedRoiChanged.connect(self.preview_panel.set_active_roi)
+        # Keep list selection in sync when a new ROI becomes active (e.g., just added)
+        try:
+            self.preview_panel.activeRoiChanged.connect(self._select_roi_in_settings)
+        except Exception:
+            pass
+
+    def _select_roi_in_settings(self, roi_id: int):
+        """Helper to select an ROI in the SettingsPanel list by id."""
+        try:
+            if hasattr(self.settings_panel, 'select_roi_by_id'):
+                self.settings_panel.select_roi_by_id(roi_id)
+        except Exception:
+            pass
 
         # --- Analysis Panel Connections ---
         self.analysis_panel.loadDataRequest.connect(self.load_analysis_data)
@@ -308,6 +486,12 @@ class MainWindow(QMainWindow):
         # Use .get() to avoid errors if a key is missing in the JSON file
         
         self.settings_panel.set_settings(master_settings.get("settings_panel", {}))
+        # Sync menu item with loaded verbose state
+        try:
+            settings_data = master_settings.get("settings_panel", {})
+            self.verbose_action.setChecked(bool(settings_data.get("verbose_logging", False)))
+        except Exception:
+            pass
         self.feature_panel.set_settings(master_settings.get("feature_panel", {}))
         self.analysis_panel.set_settings(master_settings.get("analysis_panel", {}))
 
@@ -342,37 +526,11 @@ class MainWindow(QMainWindow):
 
     def select_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Main Data Directory")
-        if directory:
-            self.main_directory = directory
-            self.dir_label.setText(self.main_directory)
-            self.statusBar().showMessage("Scanning files...")
-            self._scan_and_update_main_dir(directory)
-
-            self.grouped_files = group_files(self.main_directory)
-            if not self.grouped_files:
-                QMessageBox.warning(self, "No Files Found", "Could not find any valid TIFF files.")
-                self.statusBar().showMessage("Ready.")
-                return
-            
-            self.image_pair_list = []
-            for animal_data in self.grouped_files.values():
-                for time_data in animal_data.values():
-                    if "WF" in time_data and "FL" in time_data:
-                        self.image_pair_list.append((time_data["WF"], time_data["FL"]))
-            self.image_pair_list.sort()
-
-        # After finding all image pairs, update the UI with the time point count.
-        num_time_points = 0
-        if self.image_pair_list:
-            # Assuming number of time points is consistent per animal.
-            # Find number of unique time points for the first animal.
-            first_animal_key = next(iter(self.grouped_files.keys()))
-            num_time_points = len(self.grouped_files[first_animal_key])
-        
-        self.feature_panel.update_phase_slider_range(num_time_points)
-
-        self.statusBar().showMessage(f"Found {len(self.grouped_files)} animals across {len(self.image_pair_list)} image pairs.")
-        self.load_random_preview_image()
+        if not directory:
+            return
+        # Delegate to the central helper that scans, builds lists, updates phase sliders,
+        # and loads the initial preview image exactly once.
+        self._scan_and_update_main_dir(directory)
 
     def select_output_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -387,7 +545,17 @@ class MainWindow(QMainWindow):
         and loads an initial preview image. This is the central logic.
         """
         self.main_directory = directory
-        self.dir_label.setText(self.main_directory)
+        # Update line edit without triggering editingFinished
+        try:
+            self._suppress_dir_edit_handler = True
+            self.dir_label.setText(self.main_directory)
+            # Reset modified flag so first click doesn't fire editingFinished logic
+            try:
+                self.dir_label.setModified(False)
+            except Exception:
+                pass
+        finally:
+            self._suppress_dir_edit_handler = False
         self.statusBar().showMessage("Scanning files...")
         
         self.grouped_files = group_files(self.main_directory)
@@ -411,12 +579,19 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Found {len(self.grouped_files)} animals across {len(self.image_pair_list)} image pairs.")
         
-        # --- THIS IS THE FIX FOR BUG #1 ---
-        # Load a random image immediately after scanning is complete.
-        self.load_random_preview_image()
+        # Load an initial random image immediately after scanning is complete (forced once).
+        self.load_random_preview_image(force=True)
 
     def _on_main_dir_edited(self):
         """Handles manual edits to the main directory path."""
+        # Ignore programmatic updates or non-modified focus losses
+        if getattr(self, '_suppress_dir_edit_handler', False):
+            return
+        try:
+            if hasattr(self.dir_label, 'isModified') and not self.dir_label.isModified():
+                return
+        except Exception:
+            pass
         path = self.dir_label.text()
         if os.path.isdir(path):
             # --- MODIFIED: Call the new helper function ---
@@ -424,17 +599,40 @@ class MainWindow(QMainWindow):
             # --- END MODIFICATION ---
         elif path != self.main_directory: # Only show warning if text actually changed to something invalid
             QMessageBox.warning(self, "Invalid Path", "The entered main directory path does not exist.")
-            self.dir_label.setText(self.main_directory if self.main_directory else "Not selected.")
+            try:
+                self._suppress_dir_edit_handler = True
+                self.dir_label.setText(self.main_directory if self.main_directory else "Not selected.")
+                try:
+                    self.dir_label.setModified(False)
+                except Exception:
+                    pass
+            finally:
+                self._suppress_dir_edit_handler = False
 
     def _on_out_dir_edited(self):
         """Handles manual edits to the output directory path."""
+        if getattr(self, '_suppress_out_dir_edit_handler', False):
+            return
+        try:
+            if hasattr(self.out_dir_label, 'isModified') and not self.out_dir_label.isModified():
+                return
+        except Exception:
+            pass
         path = self.out_dir_label.text()
         if os.path.isdir(path):
             self.output_directory = path
             self.statusBar().showMessage(f"Output directory set to: {path}")
         elif path != self.output_directory:
             QMessageBox.warning(self, "Invalid Path", "The entered output directory path does not exist.")
-            self.out_dir_label.setText(self.output_directory if self.output_directory else "Not selected.")
+            try:
+                self._suppress_out_dir_edit_handler = True
+                self.out_dir_label.setText(self.output_directory if self.output_directory else "Not selected.")
+                try:
+                    self.out_dir_label.setModified(False)
+                except Exception:
+                    pass
+            finally:
+                self._suppress_out_dir_edit_handler = False
 
     def _load_preview_by_index(self, index: int):
         """Helper function to load an image pair by its index in the list."""
@@ -457,10 +655,28 @@ class MainWindow(QMainWindow):
         new_index = (self.current_preview_index + 1) % len(self.image_pair_list)
         self._load_preview_by_index(new_index)
         
-    def load_random_preview_image(self):
-        if not self.image_pair_list: return
+    def load_random_preview_image(self, force: bool = False):
+        """Load a random image. If force is False, ignore spurious calls after initial load.
+        This prevents an unexpected first-click randomization if something emits the signal once.
+        """
+        if not self.image_pair_list:
+            return
+        # Guard: only allow randomization if explicitly forced (button click or initial load)
+        if not force and getattr(self, '_did_initial_random', False):
+            # Optional: small status message for diagnostics
+            try:
+                self.statusBar().showMessage("Ignoring non-forced random image request (guard active)", 1500)
+            except Exception:
+                pass
+            return
+        self._did_initial_random = True
         new_index = random.randint(0, len(self.image_pair_list) - 1)
         self._load_preview_by_index(new_index)
+        # Optional: show which index was loaded for quick verification
+        try:
+            self.statusBar().showMessage(f"Loaded random preview (index {new_index})", 1500)
+        except Exception:
+            pass
 
     def load_specific_preview_image(self, filepath: str):
         parsed = parse_filename(filepath)
@@ -501,12 +717,56 @@ class MainWindow(QMainWindow):
             return
         self.preview_panel.set_file_info(wf_path, fl_path)
         try:
-            wf_image = imread(wf_path)
-            fl_image = imread(fl_path)
+            # Use cache if paths unchanged
+            if (self._preview_cache.get('wf_path') != wf_path) or (self._preview_cache.get('fl_path') != fl_path):
+                wf_image = imread(wf_path)
+                fl_image = imread(fl_path)
+                self._preview_cache.update({'wf_path': wf_path, 'fl_path': fl_path, 'wf_image': wf_image, 'fl_image': fl_image})
+            else:
+                wf_image = self._preview_cache.get('wf_image')
+                fl_image = self._preview_cache.get('fl_image')
             settings = self.settings_panel.get_settings() # We already get the settings here
             
             fl_rgb = apply_lut(fl_image, settings["min_intensity"], settings["max_intensity"], settings["lut"])
-            overlay_image = create_overlay(wf_image, fl_rgb, settings["transparency"])
+            overlay_image = create_overlay(wf_image, fl_rgb, settings["transparency"]) 
+
+            # Draw animal outline directly on the preview image if enabled (robust to overlay widget issues)
+            try:
+                if bool(settings.get("show_animal_outline", False)):
+                    source = str(settings.get("animal_outline_source", 'WF'))
+                    method_raw = str(settings.get("animal_outline_method", 'otsu')).lower()
+                    # Defensive: accept labels like 'manual threshold' as 'manual'
+                    method = 'manual' if method_raw.startswith('manual') else ('otsu' if method_raw.startswith('otsu') else method_raw)
+                    manual_thresh = int(settings.get("animal_outline_threshold", 5000)) if method == 'manual' else None
+                    otsu_boost = int(settings.get("animal_outline_otsu_boost", 10))
+                    color_val = settings.get("animal_outline_color", (0, 255, 0, 255))
+                    if isinstance(color_val, (tuple, list)) and len(color_val) >= 3:
+                        color_rgb = (int(color_val[0]), int(color_val[1]), int(color_val[2]))
+                    elif isinstance(color_val, str) and color_val.startswith('#'):
+                        from PyQt6.QtGui import QColor
+                        qc = QColor(color_val)
+                        color_rgb = (qc.red(), qc.green(), qc.blue())
+                    else:
+                        color_rgb = (0, 255, 0)
+                    src_img = wf_image if source == 'WF' else fl_image
+                    # Update manual-threshold control range to match data's max intensity
+                    try:
+                        if hasattr(self, 'settings_panel') and hasattr(self.settings_panel, 'set_outline_threshold_max') and src_img is not None:
+                            # Compute maximum intensity from the source image
+                            import numpy as np
+                            # Use overall max across all channels/frames as an upper bound
+                            max_val = int(np.max(src_img))
+                            self.settings_panel.set_outline_threshold_max(max_val)
+                    except Exception:
+                        pass
+                    contour = compute_animal_outline(src_img, method=method, threshold=manual_thresh, otsu_boost_percent=otsu_boost)
+                    if contour is None and source == 'FL':  # Graceful fallback to WF if FL failed
+                        contour = compute_animal_outline(wf_image, method=method, threshold=manual_thresh, otsu_boost_percent=otsu_boost)
+                    if contour is not None:
+                        overlay_image = draw_outline_on_image(overlay_image, contour, color_rgb, thickness=3)
+            except Exception:
+                # Non-fatal for preview
+                pass
             
             if not overlay_image.flags['C_CONTIGUOUS']:
                 overlay_image = np.ascontiguousarray(overlay_image)
@@ -520,6 +780,20 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Error updating preview: {e}")
 
+    def _get_first_image_size(self) -> tuple[int, int]:
+        """Return (width, height) of the first available WF image, or (0,0) if unavailable."""
+        try:
+            if self.image_pair_list:
+                wf_path, _ = self.image_pair_list[0]
+                img = imread(wf_path)
+                if img is not None:
+                    # tifffile returns arrays as HxW or HxWxC
+                    h, w = img.shape[:2]
+                    return (int(w), int(h))
+        except Exception:
+            pass
+        return (0, 0)
+
     def run_processing(self):
 
         print("\n--- DEBUG: run_processing START ---")
@@ -531,10 +805,21 @@ class MainWindow(QMainWindow):
         if settings["use_registration"] and self.template_image is None:
             QMessageBox.critical(self, "Input Required", "Registration is enabled, but no reference template has been loaded.")
             return
-        current_roi = self.preview_panel.get_roi()
-        if current_roi.isNull() or current_roi.width() <= 1 or current_roi.height() <= 1:
-            QMessageBox.critical(self, "Input Required", "Please select a valid cropping region (ROI).")
-            return
+        # Honor Apply Crop option
+        apply_crop = bool(settings.get("apply_crop", True))
+        if apply_crop:
+            current_roi = self.preview_panel.get_roi()
+            if current_roi.isNull() or current_roi.width() <= 1 or current_roi.height() <= 1:
+                QMessageBox.critical(self, "Input Required", "Please select a valid cropping region (ROI).")
+                return
+        else:
+            # Use full-frame ROI derived from the first image
+            w, h = self._get_first_image_size()
+            if w <= 0 or h <= 0:
+                # Fallback to current ROI if size couldn't be determined
+                current_roi = self.preview_panel.get_roi()
+            else:
+                current_roi = QRect(0, 0, w, h)
 
         visual_settings = self.settings_panel.get_settings()
         feature_settings = self.feature_panel.get_feature_settings()
@@ -544,7 +829,14 @@ class MainWindow(QMainWindow):
         # For now, let's assume it does.
         all_settings = {**visual_settings, **feature_settings}
 
-        self.settings_panel.setEnabled(False)
+        # Disable only configuration groups; keep control buttons responsive
+        try:
+            if hasattr(self.settings_panel, 'set_config_enabled'):
+                self.settings_panel.set_config_enabled(False)
+            else:
+                self.settings_panel.setEnabled(False)
+        except Exception:
+            self.settings_panel.setEnabled(False)
         self.feature_panel.setEnabled(False) # Disable this panel too
         self.dir_button.setEnabled(False)
         self.out_dir_button.setEnabled(False)
@@ -580,8 +872,78 @@ class MainWindow(QMainWindow):
 
         # 4. Start the thread
         print("--- DEBUG: Starting worker thread ---")
+        # Reset outcome flags at the start of a run
+        self._proc_error_message = None
+        self._proc_aborted = False
+        self._proc_stopped = False
+
         self.worker_thread.start()
         print("--- DEBUG: run_processing END ---")
+        # Switch UI to processing controls
+        self._enter_processing_controls()
+        # Immediate user feedback
+        try:
+            self.statusBar().showMessage("Processing started…")
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def pause_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            if hasattr(self.worker, 'pause'):
+                self.worker.pause()
+            self.statusBar().showMessage("Processing paused.\u00A0")
+            self._enter_paused_controls()
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def resume_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            if hasattr(self.worker, 'resume'):
+                self.worker.resume()
+            self.statusBar().showMessage("Resuming processing…")
+            self._enter_processing_controls()
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def request_abort_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Abort Processing",
+            "Are you sure you want to abort the current processing run?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                # Mark as aborted by user for final outcome message
+                self._proc_aborted = True
+                if hasattr(self.worker, 'stop'):
+                    self.worker.stop()
+                self.statusBar().showMessage("Aborting…")
+            except Exception:
+                pass
+
+    @pyqtSlot()
+    def stop_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            # Mark as stopped for final outcome message
+            self._proc_stopped = True
+            if hasattr(self.worker, 'stop'):
+                self.worker.stop()
+            self.statusBar().showMessage("Stopping…")
+        except Exception:
+            pass
 
     @pyqtSlot(str)
     def on_feature_csv_ready(self, raw_path: str):
@@ -849,12 +1211,28 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def on_processing_finished(self):
         print("\n--- DEBUG: on_processing_finished START ---")
-        
-        if "Failed" not in self.statusBar().currentMessage():
+        # Decide the correct final popup based on outcome flags
+        if self._proc_error_message:
+            # Error popup already shown in on_processing_error; just avoid showing success
+            self.statusBar().showMessage("Processing finished with errors.")
+        elif self._proc_aborted:
+            self.statusBar().showMessage("Processing aborted by user.")
+            try:
+                QMessageBox.information(self, "Aborted", "Batch processing was aborted by the user.")
+            except Exception:
+                pass
+        elif self._proc_stopped:
+            self.statusBar().showMessage("Processing stopped.")
+            try:
+                QMessageBox.information(self, "Stopped", "Batch processing was stopped. Partial outputs may exist.")
+            except Exception:
+                pass
+        else:
             self.statusBar().showMessage("Processing complete!")
-            print("--- DEBUG: Showing 'Success' message box. ---")
-            QMessageBox.information(self, "Success", "Batch processing and analysis have completed successfully!")
-            print("--- DEBUG: 'Success' message box closed. ---")
+            try:
+                QMessageBox.information(self, "Success", "Batch processing completed successfully.")
+            except Exception:
+                pass
         
         self._reset_ui_after_processing()
         print("--- DEBUG: on_processing_finished END ---")
@@ -862,6 +1240,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def on_processing_error(self, error_message: str):
         print(f"\n--- DEBUG: on_processing_error START with message: {error_message} ---")
+        # Track error for final outcome decision and show an immediate error popup
+        self._proc_error_message = error_message
         QMessageBox.critical(self, "Processing Error", error_message)
         self.statusBar().showMessage(f"Failed: {error_message}")
         print("--- DEBUG: on_processing_error END ---")
@@ -869,10 +1249,21 @@ class MainWindow(QMainWindow):
     def _reset_ui_after_processing(self):
         print("\n--- DEBUG: _reset_ui_after_processing START ---")
         self.progress_bar.setVisible(False)
-        self.settings_panel.setEnabled(True)
+        # Re-enable configuration groups after processing
+        try:
+            if hasattr(self.settings_panel, 'set_config_enabled'):
+                self.settings_panel.set_config_enabled(True)
+            else:
+                self.settings_panel.setEnabled(True)
+        except Exception:
+            self.settings_panel.setEnabled(True)
         self.feature_panel.setEnabled(True)
         self.dir_button.setEnabled(True)
         self.out_dir_button.setEnabled(True)
+        try:
+            self._enter_idle_controls()
+        except Exception:
+            pass
         
         print("--- DEBUG: Clearing worker and thread references. ---")
         self.worker_thread = None
