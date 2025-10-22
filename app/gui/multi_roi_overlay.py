@@ -25,6 +25,8 @@ class MultiROIOverlay(QWidget):
         self._handle_px = 8
         self._edge_margin_px = 6
         self._crop_widget: Optional[QWidget] = None
+        # Track when a crop drag/resize is in progress so we keep forwarding events
+        self._crop_dragging = False
 
     # Emitted when an ROI geometry changes due to interaction
     geometryChanged = pyqtSignal(int, QRect)
@@ -60,13 +62,17 @@ class MultiROIOverlay(QWidget):
 
     def _hit_test_roi(self, roi: ROI, pos) -> Optional[str]:
         """Return a drag mode if pos hits edges/handles of the given roi, else None.
-        Modes: 'move' for edges, 'tl','tr','bl','br' for corners.
+        Modes: 'move' for edges, 'tl','tr','bl','br' for corners. For contour/freehand,
+        allow MOVE when pointer is inside the bounding box.
         """
-        if roi is None or roi.rect is None:
+        if roi is None:
             return None
         vr = self._view_rect_for_roi(roi)
         if vr is None:
             return None
+        # For contour/freehand (no rect), allow move when inside bounding box
+        if roi.shape in ('contour', 'freehand') and roi.rect is None:
+            return 'move' if vr.contains(pos) else None
         hs = self._handle_px
         # Corners
         corners = {
@@ -96,7 +102,7 @@ class MultiROIOverlay(QWidget):
             return None
         # Iterate in reverse order to prefer top-most drawn
         for roi in reversed(self._mgr.rois):
-            if not roi.visible or roi.rect is None:
+            if not roi.visible:
                 continue
             mode = self._hit_test_roi(roi, pos)
             if mode is not None:
@@ -104,11 +110,20 @@ class MultiROIOverlay(QWidget):
         return None
 
     def _view_rect_for_roi(self, roi: ROI) -> Optional[QRect]:
-        if roi is None or roi.rect is None:
+        if roi is None:
             return None
-        tl = self._view.mapFromScene(QPointF(roi.rect.topLeft()))
-        br = self._view.mapFromScene(QPointF(roi.rect.bottomRight()))
-        return QRect(tl, br).normalized()
+        if roi.rect is not None:
+            tl = self._view.mapFromScene(QPointF(roi.rect.topLeft()))
+            br = self._view.mapFromScene(QPointF(roi.rect.bottomRight()))
+            return QRect(tl, br).normalized()
+        # Fallback: use bounding rect of points for contour/freehand
+        if roi.shape in ('contour', 'freehand') and roi.points:
+            xs = [p.x() for p in roi.points]
+            ys = [p.y() for p in roi.points]
+            tl = self._view.mapFromScene(QPointF(min(xs), min(ys)))
+            br = self._view.mapFromScene(QPointF(max(xs), max(ys)))
+            return QRect(tl, br).normalized()
+        return None
 
     def _is_on_crop_handle(self, pos) -> bool:
         """Return True if the given overlay-local pos is on a Cropping Window handle.
@@ -130,6 +145,38 @@ class MultiROIOverlay(QWidget):
         except Exception:
             return False
         return False
+
+    def _is_on_crop_edge(self, pos) -> bool:
+        """Return True if pos is on the crop rectangle edge band (not interior), excluding handles.
+        This lets users select/drag the crop only from edges, not by clicking inside.
+        """
+        if self._crop_widget is None:
+            return False
+        try:
+            if hasattr(self._crop_widget, 'isVisible') and not self._crop_widget.isVisible():
+                return False
+            # Map to crop widget local coords
+            pos_in_parent = self.mapToParent(pos)
+            pos_in_crop = self._crop_widget.mapFromParent(pos_in_parent)
+            r = getattr(self._crop_widget, 'roi_rect', None)
+            if r is None or r.isNull():
+                return False
+            # Exclude handle hit regions first (prefer resizing)
+            handles = getattr(self._crop_widget, 'handles', {})
+            for rect in handles.values():
+                # Slightly inflate to avoid ambiguity with border clicks near handles
+                hr = rect.adjusted(-4, -4, 4, 4)
+                if hr.contains(pos_in_crop):
+                    return False
+            # Border band thickness (fallback default if attribute missing)
+            bt = int(getattr(self._crop_widget, 'BORDER_THICKNESS', 6))
+            # Improve responsiveness by ensuring a minimum band width
+            if bt < 10:
+                bt = 10
+            inner = r.adjusted(bt, bt, -bt, -bt)
+            return r.contains(pos_in_crop) and not inner.contains(pos_in_crop)
+        except Exception:
+            return False
 
     def paintEvent(self, event):
         if self._mgr is None or self._view is None:
@@ -170,6 +217,8 @@ class MultiROIOverlay(QWidget):
                 if len(pts) > 1:
                     for i in range(len(pts) - 1):
                         p.drawLine(pts[i], pts[i+1])
+                    # Close the polygon to avoid a missing side
+                    p.drawLine(pts[-1], pts[0])
             elif roi.shape == 'text' and roi.rect is not None and roi.label:
                 # Draw text at the rect's top-left in view coordinates
                 tl = self._view.mapFromScene(QPointF(roi.rect.topLeft()))
@@ -213,11 +262,13 @@ class MultiROIOverlay(QWidget):
         # Inside: do not intercept (let panning/underlying widgets handle)
         return None
 
-    def _forward_mouse_event(self, ev: QMouseEvent):
+    def _forward_mouse_event(self, ev: QMouseEvent, allow_crop: bool = True):
         """Forward a mouse event to the cropping widget if present, else to the view's viewport.
         Coordinate systems are translated accordingly.
         """
-        target = self._crop_widget if self._crop_widget is not None else self._view.viewport()
+        # Only forward to crop widget if allowed AND it exists AND is visible; otherwise forward to view
+        use_crop = allow_crop and (self._crop_widget is not None) and getattr(self._crop_widget, 'isVisible', lambda: False)()
+        target = self._crop_widget if use_crop else self._view.viewport()
         # Map overlay-local position to target-local position
         # Start with position in viewport coordinates
         pos_in_viewport = self.mapToParent(ev.position().toPoint())
@@ -238,11 +289,31 @@ class MultiROIOverlay(QWidget):
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
             # Forward other buttons to underlying (e.g., middle for pan)
-            self._forward_mouse_event(ev)
+            # Not on any ROI edge/handle: deselect and forward, but DO NOT give focus to crop unless on its handles
+            self._forward_mouse_event(ev, allow_crop=False)
             return
         # If hovering on Cropping Window handle, let it handle first
         if self._is_on_crop_handle(ev.position().toPoint()):
-            self._forward_mouse_event(ev)
+            self._crop_dragging = True
+            # Ensure crop becomes active
+            try:
+                if hasattr(self._crop_widget, 'setActive'):
+                    self._crop_widget.setActive(True)
+            except Exception:
+                pass
+            # Forward to crop widget to start resize
+            self._forward_mouse_event(ev, allow_crop=True)
+            return
+        # If on crop edge (border), allow crop to handle move/drag; don't activate on interior
+        if self._is_on_crop_edge(ev.position().toPoint()):
+            self._crop_dragging = True
+            # Ensure crop becomes active
+            try:
+                if hasattr(self._crop_widget, 'setActive'):
+                    self._crop_widget.setActive(True)
+            except Exception:
+                pass
+            self._forward_mouse_event(ev, allow_crop=True)
             return
         # Hit-test against any ROI edges/handles and select that ROI if found
         hit = self._hit_test_any(ev.position().toPoint())
@@ -250,11 +321,26 @@ class MultiROIOverlay(QWidget):
             # Not on any ROI edge/handle: deselect and forward
             if self._active_roi_id is not None:
                 self.set_active_roi(None)
-            self._forward_mouse_event(ev)
+            # Deactivate crop if it's currently active (clicking outside)
+            try:
+                if self._crop_widget is not None and hasattr(self._crop_widget, 'isActive') and self._crop_widget.isActive():
+                    if hasattr(self._crop_widget, 'setActive'):
+                        self._crop_widget.setActive(False)
+            except Exception:
+                pass
+            # Do NOT focus crop for interior clicks; forward to view only
+            self._forward_mouse_event(ev, allow_crop=False)
             return
         rid, mode = hit
         # Select ROI and start interaction
         target = self._mgr.get_roi(rid) if self._mgr else None
+        # When selecting an ROI, deactivate crop to avoid dual-active tools
+        try:
+            if self._crop_widget is not None and hasattr(self._crop_widget, 'isActive') and self._crop_widget.isActive():
+                if hasattr(self._crop_widget, 'setActive'):
+                    self._crop_widget.setActive(False)
+        except Exception:
+            pass
         self.set_active_roi(rid)
         self._drag_mode = mode
         self._press_scene_pos = self._view.mapToScene(ev.position().toPoint())
@@ -262,8 +348,12 @@ class MultiROIOverlay(QWidget):
         ev.accept()
 
     def mouseMoveEvent(self, ev):
+        # If crop interaction is in progress, forward all moves to the crop widget
+        if self._crop_dragging:
+            self._forward_mouse_event(ev, allow_crop=True)
+            return
         roi = self._get_active_roi()
-        if roi is None or roi.rect is None:
+        if roi is None or (roi.rect is None and not (roi.shape in ('contour','freehand') and roi.points)):
             # Update cursor based on any ROI under the cursor for better affordance
             hit = self._hit_test_any(ev.position().toPoint())
             if hit is not None:
@@ -295,39 +385,56 @@ class MultiROIOverlay(QWidget):
                 cursor = Qt.CursorShape.SizeAllCursor
             self.setCursor(QCursor(cursor))
             # Forward move to underlying to support hover behaviors/panning
-            self._forward_mouse_event(ev)
+            self._forward_mouse_event(ev, allow_crop=False)
             return
 
         # Dragging: compute delta in scene space
         scene_pos = self._view.mapToScene(ev.position().toPoint())
         dx = int(scene_pos.x() - self._press_scene_pos.x()) if self._press_scene_pos else 0
         dy = int(scene_pos.y() - self._press_scene_pos.y()) if self._press_scene_pos else 0
-        r = QRect(self._orig_rect)
         mode = self._drag_mode
-        if mode == 'move':
-            r.translate(dx, dy)
+        if roi.shape in ('contour','freehand') and roi.points and mode == 'move':
+            # Translate all points
+            new_pts = []
+            for p in roi.points:
+                new_pts.append(QPointF(p.x() + dx, p.y() + dy))
+            roi.points = new_pts
+            # Update an implicit rect for UI sync
+            xs = [p.x() for p in roi.points]
+            ys = [p.y() for p in roi.points]
+            roi.rect = QRect(int(min(xs)), int(min(ys)), int(max(xs)-min(xs)), int(max(ys)-min(ys)))
         else:
-            if mode in ('l','tl','bl'):
-                r.setLeft(r.left() + dx)
-            if mode in ('r','tr','br'):
-                r.setRight(r.right() + dx)
-            if mode in ('t','tl','tr'):
-                r.setTop(r.top() + dy)
-            if mode in ('b','bl','br'):
-                r.setBottom(r.bottom() + dy)
-        # Normalize to avoid inverted rects
-        r = r.normalized()
-        roi.rect = r
+            r = QRect(self._orig_rect)
+            if mode == 'move':
+                r.translate(dx, dy)
+            else:
+                if mode in ('l','tl','bl'):
+                    r.setLeft(r.left() + dx)
+                if mode in ('r','tr','br'):
+                    r.setRight(r.right() + dx)
+                if mode in ('t','tl','tr'):
+                    r.setTop(r.top() + dy)
+                if mode in ('b','bl','br'):
+                    r.setBottom(r.bottom() + dy)
+            # Normalize to avoid inverted rects
+            r = r.normalized()
+            roi.rect = r
         self.update()
         self.geometryChanged.emit(roi.id, QRect(roi.rect))
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
+            # Finish crop interactions first if any
+            if self._crop_dragging:
+                self._forward_mouse_event(ev, allow_crop=True)
+                self._crop_dragging = False
+                ev.accept()
+                return
             self._drag_mode = None
             self._press_scene_pos = None
             self._orig_rect = None
             ev.accept()
             return
-        # Forward other button releases to underlying
-        self._forward_mouse_event(ev)
+        # Forward other button releases to underlying; avoid focusing crop unless on its handles
+        self._forward_mouse_event(ev, allow_crop=False)

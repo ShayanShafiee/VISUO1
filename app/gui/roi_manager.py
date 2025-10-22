@@ -25,6 +25,17 @@ class ROI:
     points: Optional[List[QPointF]] = None # for freehand/contour
     # Optional text content for text annotations
     label: Optional[str] = None
+    # Optional algorithmic ROI parameters (for auto/threshold types)
+    algo: Optional[str] = None           # 'otsu' | 'threshold' | None
+    channel: Optional[str] = None        # 'WF' | 'FL' | None
+    threshold: Optional[int] = None      # manual threshold value
+    otsu_boost: Optional[int] = None     # boost percent for otsu
+    # Base image size at creation or last edit (for proportional scaling across images)
+    base_w: Optional[int] = None
+    base_h: Optional[int] = None
+    # Composite ROI metadata (depends on other ROIs)
+    composite_op: Optional[str] = None           # 'or'|'and'|'sub'|'xor'|None
+    composite_sources: Optional[List[int]] = None
 
     def as_rect(self) -> Optional[QRect]:
         return self.rect
@@ -72,6 +83,12 @@ class ROIManager:
                 'shape': r.shape,
                 'color': (r.color.red(), r.color.green(), r.color.blue(), r.color.alpha()),
                 'visible': r.visible,
+                'algo': r.algo,
+                'channel': r.channel,
+                'threshold': r.threshold,
+                'otsu_boost': r.otsu_boost,
+                'composite_op': r.composite_op,
+                'composite_sources': list(r.composite_sources) if r.composite_sources else None,
             }
             for r in self.rois
         ]

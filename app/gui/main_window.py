@@ -404,6 +404,18 @@ class MainWindow(QMainWindow):
 
         # --- Multi-ROI wiring (Annotations) ---
         self.settings_panel.addRectangleRoiRequested.connect(self.preview_panel.add_rectangle_roi)
+        try:
+            self.settings_panel.addCircleRoiRequested.connect(self.preview_panel.add_circle_roi)
+            self.settings_panel.addAutoOtsuRoiRequested.connect(self.preview_panel.add_auto_otsu_roi)
+            self.settings_panel.addThresholdRoiRequested.connect(self.preview_panel.add_threshold_roi)
+            # Composite ROI wiring
+            if hasattr(self.preview_panel, 'add_composite_roi'):
+                self.settings_panel.addCompositeRoiRequested.connect(self.preview_panel.add_composite_roi)
+            if hasattr(self.preview_panel, 'update_composite_roi_properties'):
+                self.settings_panel.changeCompositePropertiesRequested.connect(self.preview_panel.update_composite_roi_properties)
+            self.settings_panel.changeRoiPropertiesRequested.connect(self.preview_panel.update_auto_roi_properties)
+        except Exception:
+            pass
         self.settings_panel.renameRoiRequested.connect(self.preview_panel.rename_roi)
         self.settings_panel.removeRoiRequested.connect(self.preview_panel.remove_roi)
         self.settings_panel.toggleRoiVisibilityRequested.connect(self.preview_panel.set_roi_visibility)

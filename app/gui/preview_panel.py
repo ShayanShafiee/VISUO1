@@ -3,12 +3,13 @@
 import os
 import cv2
 import numpy as np
-from processing.image_processor import create_gradient_image
+from processing.image_processor import create_gradient_image, compute_animal_outline
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLayout, QApplication,
                              QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
                              QGraphicsView, QGraphicsScene, QInputDialog)
 from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF, QSize
+from typing import Optional
 
 from .interactive_roi import InteractiveROI
 from .roi_manager import ROIManager, ROI
@@ -215,6 +216,8 @@ class PreviewPanel(QWidget):
         self._resize_timer.timeout.connect(self._on_resize_settled)
         # ROI clipboard for copy/paste
         self._roi_clipboard = None
+        # Guard against duplicate composite additions
+        self._adding_composite = False
 
         self._init_ui()
 
@@ -493,6 +496,11 @@ class PreviewPanel(QWidget):
                 else:
                     # Subsequent updates (e.g., intensity/LUT changes): preserve zoom/center
                     self.image_view.update_pixmap(pixmap, preserve_center=True)
+                # After the pixmap is (re)applied, reapply ROIs to the new image size/content
+                try:
+                    self._reapply_rois_for_current_image()
+                except Exception:
+                    pass
             # Show/hide cropping overlay based on settings and update mask opacity
             try:
                 show_crop = bool(self.current_settings.get("show_crop_overlay", True))
@@ -684,13 +692,310 @@ class PreviewPanel(QWidget):
         palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
         idx = len(self.roi_manager.rois) % len(palette)
         name = f"ROI {len(self.roi_manager.rois)+1}"
-        roi = ROI(shape='rect', name=name, color=palette[idx], rect=rect)
+        roi = ROI(shape='rect', name=name, color=palette[idx], rect=rect, base_w=int(iw), base_h=int(ih))
         self.roi_manager.add_roi(roi)
         self.multi_roi_overlay.update()
         self.roiListUpdated.emit(self.roi_manager.list_summary())
         # Make the new ROI active and bring overlay to front for immediate editing
         self.set_active_roi(roi.id)
         self.activeRoiChanged.emit(roi.id)
+
+    def add_circle_roi(self):
+        """Add a circular (ellipse) ROI centered in the current view using a square bounding rect."""
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        scene_rect = self.image_view.scene().sceneRect()
+        iw, ih = scene_rect.width(), scene_rect.height()
+        d = int(min(iw, ih) * 0.25)
+        cx, cy = int(scene_rect.center().x()), int(scene_rect.center().y())
+        rect = QRect(int(cx - d/2), int(cy - d/2), d, d)
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"ROI {len(self.roi_manager.rois)+1}"
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(shape='ellipse', name=name, color=palette[idx], rect=rect, base_w=int(scene_rect.width()), base_h=int(scene_rect.height()))
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+
+    def _get_channel_image(self, channel: str):
+        """Load and return the selected channel image (WF or FL) as a 2D array."""
+        from tifffile import imread
+        path = self._wf_path if str(channel).upper() == 'WF' else self._fl_path
+        if not path:
+            return None
+        try:
+            img = imread(path)
+            return img
+        except Exception:
+            return None
+
+    def _compute_auto_contour(self, algo: str, channel: str, threshold: Optional[int], otsu_boost: Optional[int]):
+        """Compute a contour using the given algorithm parameters from the selected channel."""
+        img = self._get_channel_image(channel)
+        if img is None:
+            return None
+        if str(algo).lower() == 'threshold':
+            return compute_animal_outline(img, method='manual', threshold=int(threshold) if threshold is not None else None)
+        # default otsu
+        boost = int(otsu_boost) if otsu_boost is not None else 10
+        return compute_animal_outline(img, method='otsu', otsu_boost_percent=boost)
+
+    def _contour_to_points(self, contour) -> list:
+        """Convert OpenCV contour to a list of QPointF for overlay drawing."""
+        pts = []
+        try:
+            if contour is None:
+                return pts
+            c = contour.squeeze()
+            import numpy as np
+            if c.ndim == 1:
+                c = np.expand_dims(c, axis=0)
+            for x, y in c.tolist():
+                pts.append(QPointF(float(x), float(y)))
+        except Exception:
+            pass
+        return pts
+
+    # --- Composite ROI helpers ---
+    def _roi_to_mask(self, roi, w: int, h: int):
+        """Rasterize an ROI (rect/ellipse/contour) into a boolean mask of shape (h, w)."""
+        try:
+            import numpy as np
+            import cv2
+        except Exception:
+            return None
+        mask = np.zeros((h, w), dtype=np.uint8)
+        shape = getattr(roi, 'shape', None)
+        if shape in ('rect', 'ellipse') and roi.rect is not None:
+            x, y, ww, hh = int(roi.rect.x()), int(roi.rect.y()), int(roi.rect.width()), int(roi.rect.height())
+            if shape == 'rect':
+                cv2.rectangle(mask, (x, y), (x+ww, y+hh), color=1, thickness=-1)
+            else:
+                center = (int(x + ww/2), int(y + hh/2))
+                axes = (int(ww/2), int(hh/2))
+                cv2.ellipse(mask, center, axes, 0, 0, 360, color=1, thickness=-1)
+        elif shape in ('contour', 'freehand') and roi.points:
+            try:
+                import numpy as np
+                pts = np.array([[int(p.x()), int(p.y())] for p in roi.points], dtype=np.int32)
+                pts = pts.reshape((-1, 1, 2))
+                cv2.fillPoly(mask, [pts], color=1)
+            except Exception:
+                pass
+        # text/no geometry => empty
+        return mask.astype(bool)
+
+    def _compose_masks(self, masks: list, op: str):
+        try:
+            import numpy as np
+        except Exception:
+            return None
+        if not masks:
+            return None
+        opk = (op or 'or').lower()
+        if opk in ('or', 'add', 'union'):
+            m = masks[0].copy()
+            for mm in masks[1:]:
+                m |= mm
+            return m
+        if opk in ('and', 'intersection'):
+            m = masks[0].copy()
+            for mm in masks[1:]:
+                m &= mm
+            return m
+        if opk in ('xor',):
+            m = masks[0].copy()
+            for mm in masks[1:]:
+                m ^= mm
+            return m
+        if opk in ('sub', 'subtract', 'difference'):
+            m = masks[0].copy()
+            for mm in masks[1:]:
+                m &= (~mm)
+            return m
+        # default union
+        m = masks[0].copy()
+        for mm in masks[1:]:
+            m |= mm
+        return m
+
+    def _mask_to_largest_contour(self, mask):
+        try:
+            import numpy as np
+            import cv2
+        except Exception:
+            return None
+        if mask is None:
+            return None
+        mm = (mask.astype('uint8')) * 255
+        cnts, _ = cv2.findContours(mm, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+        # choose largest by area
+        cnt = max(cnts, key=cv2.contourArea)
+        return cnt
+
+    def _compute_composite_points(self, sources: list, op: str) -> list:
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return []
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            nw, nh = int(scene_rect.width()), int(scene_rect.height())
+        except Exception:
+            return []
+        rois = [self.roi_manager.get_roi(rid) for rid in sources]
+        rois = [r for r in rois if r is not None]
+        if len(rois) < 2:
+            return []
+        masks = []
+        for r in rois:
+            m = self._roi_to_mask(r, nw, nh)
+            if m is not None:
+                masks.append(m)
+        if len(masks) < 2:
+            return []
+        cmask = self._compose_masks(masks, op)
+        cnt = self._mask_to_largest_contour(cmask)
+        return self._contour_to_points(cnt)
+
+    def add_auto_otsu_roi(self):
+        """Add an auto ROI using Otsu on WF by default; user can edit props later."""
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"ROI {len(self.roi_manager.rois)+1}"
+        channel = 'WF'
+        boost = 10
+        contour = self._compute_auto_contour('otsu', channel, None, boost)
+        pts = self._contour_to_points(contour)
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(shape='contour', name=name, color=palette[idx], points=pts, algo='otsu', channel=channel, otsu_boost=boost, base_w=int(scene_rect.width()), base_h=int(scene_rect.height()))
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        # Make new ROI active for immediate editing
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+
+    def add_threshold_roi(self):
+        """Add a manual-threshold ROI on WF with a default threshold; user can edit props later."""
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        # Create an initial contour using default params; properties dialog lets user change them
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"ROI {len(self.roi_manager.rois)+1}"
+        channel = 'WF'
+        thresh = 5000
+        contour = self._compute_auto_contour('threshold', channel, thresh, None)
+        pts = self._contour_to_points(contour)
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(shape='contour', name=name, color=palette[idx], points=pts,
+                  algo='threshold', channel=channel, threshold=thresh,
+                  base_w=int(scene_rect.width()), base_h=int(scene_rect.height()))
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        # Make new ROI active for immediate editing
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+
+    def add_composite_roi(self, cfg: object):
+        """Create a composite ROI from provided config: {'op': str, 'sources': List[int]}"""
+        if getattr(self, '_adding_composite', False):
+            return
+        self._adding_composite = True
+        try:
+            op = (cfg or {}).get('op')
+            sources = list((cfg or {}).get('sources') or [])
+        except Exception:
+            self._adding_composite = False
+            return
+        if not sources or len(sources) < 2:
+            self._adding_composite = False
+            return
+        pts = self._compute_composite_points(sources, op)
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"Composite {len(self.roi_manager.rois)+1}"
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(shape='contour', name=name, color=palette[idx], points=pts, algo='composite',
+                  base_w=int(scene_rect.width()), base_h=int(scene_rect.height()))
+        roi.composite_op = op
+        roi.composite_sources = sources
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+        finally:
+            self._adding_composite = False
+
+    def update_auto_roi_properties(self, roi_id: int, props: dict):
+        """Update channel/threshold/boost for an auto/threshold ROI and recompute its contour."""
+        roi = self.roi_manager.get_roi(roi_id)
+        if not roi:
+            return
+        algo = (getattr(roi, 'algo', None) or '').lower()
+        if algo not in ('otsu', 'threshold'):
+            return
+        # Update parameters from props (falling back to existing)
+        ch = props.get('channel', roi.channel or 'WF')
+        roi.channel = 'FL' if str(ch).upper() == 'FL' else 'WF'
+        if algo == 'otsu':
+            roi.otsu_boost = int(props.get('otsu_boost', roi.otsu_boost or 10))
+        else:
+            roi.threshold = int(props.get('threshold', roi.threshold or 5000))
+        # Recompute contour based on updated params
+        contour = self._compute_auto_contour(algo, roi.channel, roi.threshold, roi.otsu_boost)
+        roi.points = self._contour_to_points(contour)
+        # Update base dims for proportional scaling across images
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            roi.base_w = int(scene_rect.width())
+            roi.base_h = int(scene_rect.height())
+        except Exception:
+            pass
+        # Refresh overlay and list
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+
+    def update_composite_roi_properties(self, roi_id: int, props: dict):
+        roi = self.roi_manager.get_roi(roi_id)
+        if not roi or (roi.algo or '').lower() != 'composite':
+            return
+        op = props.get('op') or props.get('composite_op') or roi.composite_op or 'or'
+        sources = list(props.get('sources') or props.get('composite_sources') or (roi.composite_sources or []))
+        if len(sources) < 2:
+            return
+        roi.composite_op = op
+        roi.composite_sources = sources
+        roi.points = self._compute_composite_points(sources, op)
+        # Update base dims
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            roi.base_w = int(scene_rect.width())
+            roi.base_h = int(scene_rect.height())
+        except Exception:
+            pass
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
 
     def set_roi_visibility(self, roi_id: int, visible: bool):
         self.roi_manager.set_roi_visibility(roi_id, visible)
@@ -705,6 +1010,11 @@ class PreviewPanel(QWidget):
         self.roi_manager.remove_roi(roi_id)
         self.multi_roi_overlay.update()
         self.roiListUpdated.emit(self.roi_manager.list_summary())
+        # Recompute composites that referenced this id
+        try:
+            self._recompute_composite_rois(affected_ids=[roi_id])
+        except Exception:
+            pass
 
     def change_roi_color(self, roi_id: int, color: QColor):
         """Update the color of an ROI and refresh overlay + list."""
@@ -765,7 +1075,7 @@ class PreviewPanel(QWidget):
         roi = self.roi_manager.get_roi(rid)
         if not roi:
             return
-        # Shallow snapshot (color, rect, points, shape, label, name)
+        # Shallow snapshot (color, rect, points, shape, label, name, algo and params)
         self._roi_clipboard = {
             'shape': roi.shape,
             'name': roi.name,
@@ -773,6 +1083,12 @@ class PreviewPanel(QWidget):
             'rect': QRect(roi.rect) if roi.rect else None,
             'points': list(roi.points) if roi.points else None,
             'label': roi.label if hasattr(roi, 'label') else None,
+            'algo': getattr(roi, 'algo', None),
+            'channel': getattr(roi, 'channel', None),
+            'threshold': getattr(roi, 'threshold', None),
+            'otsu_boost': getattr(roi, 'otsu_boost', None),
+            'composite_op': getattr(roi, 'composite_op', None),
+            'composite_sources': list(getattr(roi, 'composite_sources', []) or []),
         }
 
     def cut_active_roi(self):
@@ -791,13 +1107,22 @@ class PreviewPanel(QWidget):
         if rect is not None:
             rect.translate(10, 10)
         new_name = f"Copy of {data['name']}" if data.get('name') else "ROI"
+        scene_rect = self.image_view.scene().sceneRect()
         new_roi = ROI(
             shape=data.get('shape', 'rect'),
             name=new_name,
             color=data.get('color', QColor('#64b5f6')),
             rect=rect,
             points=list(data['points']) if data.get('points') else None,
+            base_w=int(scene_rect.width()), base_h=int(scene_rect.height()),
         )
+        # Restore algorithmic/composite metadata when present
+        new_roi.algo = data.get('algo')
+        new_roi.channel = data.get('channel')
+        new_roi.threshold = data.get('threshold')
+        new_roi.otsu_boost = data.get('otsu_boost')
+        new_roi.composite_op = data.get('composite_op')
+        new_roi.composite_sources = list(data.get('composite_sources') or [])
         if hasattr(new_roi, 'label') and data.get('label'):
             new_roi.label = data['label']
         self.roi_manager.add_roi(new_roi)
@@ -822,7 +1147,8 @@ class PreviewPanel(QWidget):
         palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
         idx = len(self.roi_manager.rois) % len(palette)
         name = f"Text {len(self.roi_manager.rois)+1}"
-        roi = ROI(shape='text', name=name, color=palette[idx], rect=rect)
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(shape='text', name=name, color=palette[idx], rect=rect, base_w=int(scene_rect.width()), base_h=int(scene_rect.height()))
         roi.label = text.strip()
         self.roi_manager.add_roi(roi)
         self.multi_roi_overlay.update()
@@ -835,7 +1161,110 @@ class PreviewPanel(QWidget):
 
     def _on_multi_roi_geometry_changed(self, roi_id: int, rect: QRect):
         """When user moves/resizes an ROI on the overlay, refresh the list for UI sync."""
+        # Update base size to current image for proportional remapping
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            nw, nh = int(scene_rect.width()), int(scene_rect.height())
+            roi = self.roi_manager.get_roi(roi_id)
+            if roi is not None:
+                roi.base_w = nw
+                roi.base_h = nh
+        except Exception:
+            pass
         self.roiListUpdated.emit(self.roi_manager.list_summary())
+        # Recompute composites that depend on this ROI
+        try:
+            self._recompute_composite_rois(affected_ids=[roi_id])
+        except Exception:
+            pass
+
+    def _reapply_rois_for_current_image(self):
+        """Reapply ROI definitions when the image changes.
+        - For algorithmic ROIs (algo='otsu'/'threshold'): recompute contour using current image.
+        - For geometric ROIs (rect/ellipse/text): proportionally scale from base_w/base_h to new size.
+        """
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            nw, nh = int(scene_rect.width()), int(scene_rect.height())
+        except Exception:
+            return
+        changed = False
+        for roi in list(self.roi_manager.rois):
+            algo = (getattr(roi, 'algo', None) or '').lower()
+            if algo in ('otsu', 'threshold'):
+                contour = self._compute_auto_contour(algo, getattr(roi, 'channel', 'WF') or 'WF', getattr(roi, 'threshold', None), getattr(roi, 'otsu_boost', None))
+                roi.points = self._contour_to_points(contour)
+                roi.base_w = nw
+                roi.base_h = nh
+                changed = True
+            elif roi.shape in ('rect', 'ellipse') and roi.rect is not None:
+                bw = getattr(roi, 'base_w', None) or nw
+                bh = getattr(roi, 'base_h', None) or nh
+                if bw != nw or bh != nh:
+                    sx = (nw / bw) if bw else 1.0
+                    sy = (nh / bh) if bh else 1.0
+                    r = roi.rect
+                    roi.rect = QRect(int(r.x()*sx), int(r.y()*sy), int(r.width()*sx), int(r.height()*sy))
+                    roi.base_w = nw
+                    roi.base_h = nh
+                    changed = True
+            elif roi.shape == 'text' and roi.rect is not None:
+                bw = getattr(roi, 'base_w', None) or nw
+                bh = getattr(roi, 'base_h', None) or nh
+                if bw != nw or bh != nh:
+                    sx = (nw / bw) if bw else 1.0
+                    sy = (nh / bh) if bh else 1.0
+                    pt = roi.rect.topLeft()
+                    roi.rect = QRect(int(pt.x()*sx), int(pt.y()*sy), roi.rect.width(), roi.rect.height())
+                    roi.base_w = nw
+                    roi.base_h = nh
+                    changed = True
+        if changed:
+            try:
+                self.multi_roi_overlay.update()
+            except Exception:
+                pass
+            try:
+                self.roiListUpdated.emit(self.roi_manager.list_summary())
+            except Exception:
+                pass
+        # Always recompute composite ROIs after base ROIs are reapplied
+        try:
+            self._recompute_composite_rois()
+        except Exception:
+            pass
+
+    def _recompute_composite_rois(self, affected_ids: Optional[list] = None):
+        """Recompute all composite ROIs, or only those affected by given ROI ids."""
+        any_change = False
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            nw, nh = int(scene_rect.width()), int(scene_rect.height())
+        except Exception:
+            return
+        for roi in list(self.roi_manager.rois):
+            if (roi.algo or '').lower() != 'composite':
+                continue
+            sources = list(roi.composite_sources or [])
+            if not sources or len(sources) < 2:
+                continue
+            if affected_ids is not None and not any(sid in affected_ids for sid in sources):
+                continue
+            roi.points = self._compute_composite_points(sources, roi.composite_op or 'or')
+            roi.base_w = nw
+            roi.base_h = nh
+            any_change = True
+        if any_change:
+            try:
+                self.multi_roi_overlay.update()
+            except Exception:
+                pass
+            try:
+                self.roiListUpdated.emit(self.roi_manager.list_summary())
+            except Exception:
+                pass
 
     def _on_resize_settled(self):
         """After resize ends, snap the ROI overlay exactly to settings panel values if available."""

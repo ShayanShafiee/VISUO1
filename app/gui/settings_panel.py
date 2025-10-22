@@ -21,6 +21,12 @@ class SettingsPanel(QWidget):
     roiChangedFromSpinners = pyqtSignal(QRect)
     # Multi-ROI management
     addRectangleRoiRequested = pyqtSignal()
+    addCircleRoiRequested = pyqtSignal()
+    addAutoOtsuRoiRequested = pyqtSignal()
+    addThresholdRoiRequested = pyqtSignal()
+    addCompositeRoiRequested = pyqtSignal(object)  # payload: {'op': str, 'sources': List[int]}
+    changeRoiPropertiesRequested = pyqtSignal(int, dict)
+    changeCompositePropertiesRequested = pyqtSignal(int, dict)
     renameRoiRequested = pyqtSignal(int, str)
     removeRoiRequested = pyqtSignal(int)
     toggleRoiVisibilityRequested = pyqtSignal(int, bool)
@@ -328,8 +334,8 @@ class SettingsPanel(QWidget):
         self.roi_show_all_chk.toggled.connect(self._on_toggle_all_rois_visible)
         header_row.addWidget(self.roi_show_all_chk)
         header_row.addStretch(1)
-        self.add_roi_btn = QPushButton("Add Rectangle ROI")
-        self.add_roi_btn.clicked.connect(self.addRectangleRoiRequested.emit)
+        self.add_roi_btn = QPushButton("Add ROI")
+        self.add_roi_btn.clicked.connect(self._show_add_roi_menu)
         header_row.addWidget(self.add_roi_btn)
         ann_layout.addLayout(header_row)
         self.roi_list = QListWidget()
@@ -460,19 +466,38 @@ class SettingsPanel(QWidget):
             swatch.setStyleSheet(f"background-color: rgba({r},{g},{b},{a}); border: 1px solid #666; border-radius: 2px;")
             row.addWidget(swatch)
 
-            # Name label
+            # Type icon + Name label
+            icon_lbl = QLabel()
+            icon_lbl.setFixedSize(18, 18)
+            shape = s.get('shape')
+            algo = s.get('algo')
+            icon = self._make_roi_type_icon(shape, algo)
+            icon_lbl.setPixmap(icon.pixmap(18, 18))
+            # Helpful tooltip describing ROI type
+            type_name = self._roi_type_label(shape, algo)
+            icon_lbl.setToolTip(type_name)
+            row.addWidget(icon_lbl)
+
             name_label = QLabel(name)
             name_label.setToolTip("Double-click to rename")
             name_label.setStyleSheet("font-size: 10pt;")
             row.addWidget(name_label, 1)
 
             # Buttons: edit name, visibility, color, remove
-            edit_btn = QToolButton()
-            edit_btn.setIcon(self._make_edit_icon())
-            edit_btn.setToolTip("Rename…")
-            edit_btn.setAutoRaise(True)
-            edit_btn.clicked.connect(lambda _, rid=rid: self._prompt_rename(rid))
-            row.addWidget(edit_btn)
+            rename_btn = QToolButton()
+            rename_btn.setIcon(self._make_edit_icon())
+            rename_btn.setToolTip("Rename…")
+            rename_btn.setAutoRaise(True)
+            rename_btn.clicked.connect(lambda _, rid=rid: self._prompt_rename(rid))
+            row.addWidget(rename_btn)
+
+            props_btn = QToolButton()
+            # Use a custom-drawn "sliders" icon to avoid Qt style enum differences across versions
+            props_btn.setIcon(self._make_props_icon())
+            props_btn.setToolTip("Edit ROI properties…")
+            props_btn.setAutoRaise(True)
+            props_btn.clicked.connect(lambda _, rid=rid: self._open_roi_properties(rid))
+            row.addWidget(props_btn)
 
             vis_btn = QToolButton()
             vis_btn.setCheckable(True)
@@ -565,6 +590,165 @@ class SettingsPanel(QWidget):
                 except Exception:
                     pass
         return super().eventFilter(obj, event)
+
+    # --- Add ROI Menu ---
+    def _show_add_roi_menu(self):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_rect = menu.addAction("Rectangle")
+        act_circle = menu.addAction("Circle")
+        menu.addSeparator()
+        act_otsu = menu.addAction("Auto (Otsu)")
+        act_thresh = menu.addAction("Manual Threshold")
+        act_comp = menu.addAction("Composite (Combine ROIs)")
+        act = menu.exec(self.add_roi_btn.mapToGlobal(self.add_roi_btn.rect().bottomLeft()))
+        if act is None:
+            return
+        if act == act_rect:
+            self.addRectangleRoiRequested.emit()
+        elif act == act_circle:
+            self.addCircleRoiRequested.emit()
+        elif act == act_otsu:
+            self.addAutoOtsuRoiRequested.emit()
+        elif act == act_thresh:
+            self.addThresholdRoiRequested.emit()
+        elif act == act_comp:
+            cfg = self._open_composite_dialog(existing_props=None)
+            if cfg is not None:
+                self.addCompositeRoiRequested.emit(cfg)
+
+    def _open_roi_properties(self, roi_id: int):
+        s = self._roi_summaries_by_id.get(roi_id, {})
+        algo = (s.get('algo') or '').lower()
+        if algo not in ('otsu', 'threshold', 'composite'):
+            # No properties for geometric ROIs
+            return
+        if algo == 'composite':
+            cfg = self._open_composite_dialog(existing_props=s, editing_roi_id=roi_id)
+            if cfg is not None:
+                self.changeCompositePropertiesRequested.emit(roi_id, cfg)
+            return
+        # Build a simple dialog using input widgets
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("ROI Properties")
+        fl = QFormLayout(dlg)
+        ch_combo = QComboBox(dlg)
+        ch_combo.addItems(["WF", "FL"])
+        ch_combo.setCurrentText(str(s.get('channel') or 'WF'))
+        fl.addRow("Channel:", ch_combo)
+        if algo == 'otsu':
+            boost_spin = QSpinBox(dlg)
+            boost_spin.setRange(0, 50)
+            boost_spin.setSuffix(" %")
+            boost_spin.setValue(int(s.get('otsu_boost') or 10))
+            fl.addRow("Otsu boost:", boost_spin)
+        else:
+            th_spin = QSpinBox(dlg)
+            th_spin.setRange(0, 65535)
+            th_spin.setValue(int(s.get('threshold') or 5000))
+            fl.addRow("Threshold:", th_spin)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        fl.addWidget(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            props = { 'channel': ch_combo.currentText() }
+            if algo == 'otsu':
+                props['otsu_boost'] = boost_spin.value()
+            else:
+                props['threshold'] = th_spin.value()
+            self.changeRoiPropertiesRequested.emit(roi_id, props)
+    
+    def _open_composite_dialog(self, existing_props: Optional[dict], editing_roi_id: Optional[int] = None) -> Optional[dict]:
+        """Dialog to create or edit a Composite ROI combining existing ROIs.
+        Returns {'op': str, 'sources': List[int]} or None if canceled.
+        """
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QListWidget, QListWidgetItem, QComboBox, QLabel, QHBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Composite ROI")
+        fl = QFormLayout(dlg)
+
+        # Operation selector
+        op_combo = QComboBox(dlg)
+        op_combo.addItems(["Union (OR)", "Intersection (AND)", "Subtract (A - B...)", "XOR"])
+        op_map = {
+            "Union (OR)": "or",
+            "Intersection (AND)": "and",
+            "Subtract (A - B...)": "sub",
+            "XOR": "xor",
+        }
+        if existing_props and (existing_props.get('composite_op')):
+            # try to set by reverse map
+            rev = {v:k for k,v in op_map.items()}
+            label = rev.get(existing_props.get('composite_op'))
+            if label:
+                op_combo.setCurrentText(label)
+        fl.addRow("Operation:", op_combo)
+
+        # Source ROIs list (checkboxes)
+        src_list = QListWidget(dlg)
+        src_list.setSelectionMode(src_list.SelectionMode.NoSelection)
+        # Build from current ROI summaries; exclude text annotations; optionally exclude self while editing
+        options = []
+        for rid, summary in self._roi_summaries_by_id.items():
+            if editing_roi_id is not None and rid == editing_roi_id:
+                continue
+            shape = summary.get('shape')
+            if str(shape) == 'text':
+                continue
+            options.append((rid, summary.get('name', f"ROI {rid}")))
+        options.sort(key=lambda x: x[1].lower())
+        existing_sources = set(existing_props.get('composite_sources') or []) if existing_props else set()
+        for rid, name in options:
+            it = QListWidgetItem(name)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if rid in existing_sources else Qt.CheckState.Unchecked)
+            it.setData(Qt.ItemDataRole.UserRole, rid)
+            src_list.addItem(it)
+        fl.addRow(QLabel("Select source ROIs:"))
+        fl.addRow(src_list)
+
+        # For subtraction, choose primary A
+        prim_combo = QComboBox(dlg)
+        prim_combo.addItem("(auto: first selected)", -1)
+        for rid, name in options:
+            prim_combo.addItem(name, rid)
+        # Set default primary if in existing props
+        if existing_props:
+            primary = existing_props.get('composite_sources', [None])[0] if existing_props.get('composite_sources') else None
+            if primary is not None:
+                # find index
+                for i in range(prim_combo.count()):
+                    if prim_combo.itemData(i) == primary:
+                        prim_combo.setCurrentIndex(i)
+                        break
+        fl.addRow("Primary (for Subtract):", prim_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        fl.addWidget(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        # Collect sources
+        sources = []
+        for i in range(src_list.count()):
+            it = src_list.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                sources.append(int(it.data(Qt.ItemDataRole.UserRole)))
+        if len(sources) < 2:
+            return None
+        op_key = op_map[op_combo.currentText()]
+        if op_key == 'sub':
+            prim = prim_combo.currentData()
+            if prim in (None, -1):
+                # default to smallest-id first selected
+                prim = min(sources)
+            # order: primary first, then others excluding primary
+            sources = [prim] + [s for s in sources if s != prim]
+        return {'op': op_key, 'sources': sources}
 
     def _on_remove_roi(self):
         rid = self._current_roi_id()
@@ -679,6 +863,117 @@ class SettingsPanel(QWidget):
         p.drawLine(int(size*0.65), int(size*0.30), int(size*0.75), int(size*0.20))
         p.end()
         return QIcon(pm)
+
+    def _make_props_icon(self) -> 'QIcon':
+        """Create a simple 'sliders' icon to represent properties/settings."""
+        from PyQt6.QtGui import QIcon, QPainter, QPen, QPixmap, QBrush
+        size = 64
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(230,230,230))
+        pen.setWidthF(size*0.06)
+        p.setPen(pen)
+        # Three horizontal lines with square knobs
+        y_vals = [int(size*0.30), int(size*0.50), int(size*0.70)]
+        x1, x2 = int(size*0.18), int(size*0.82)
+        knob_positions = [int(size*0.35), int(size*0.55), int(size*0.45)]
+        for y, kx in zip(y_vals, knob_positions):
+            p.drawLine(x1, y, x2, y)
+            # knob
+            ks = int(size*0.10)
+            p.drawRect(kx - ks//2, y - ks//2, ks, ks)
+        p.end()
+        return QIcon(pm)
+
+    def _make_roi_type_icon(self, shape: str, algo: Optional[str]) -> 'QIcon':
+        from PyQt6.QtGui import QIcon, QPainter, QPen, QPixmap, QBrush, QFont
+        size = 64
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Defaults
+        pen = QPen(QColor(240, 240, 240))
+        pen.setWidthF(size * 0.08)
+        p.setPen(pen)
+
+        algo_key = (algo or '').lower()
+        shape_key = (shape or '').lower()
+
+        if algo_key in ('otsu', 'threshold', 'composite'):
+            # Badge with letter (O/T)
+            if algo_key == 'otsu':
+                fill = QColor('#7e57c2')
+                letter = 'O'
+            elif algo_key == 'threshold':
+                fill = QColor('#fb8c00')
+                letter = 'T'
+            else:
+                fill = QColor('#29b6f6')
+                letter = 'C'
+            p.setBrush(QBrush(fill))
+            r = int(size * 0.18)
+            p.drawEllipse(r, r, size - 2*r, size - 2*r)
+            # Letter
+            p.setPen(QPen(QColor(255, 255, 255)))
+            font = QFont()
+            font.setBold(True)
+            font.setPixelSize(int(size * 0.46))
+            p.setFont(font)
+            # Center text
+            from PyQt6.QtCore import QRect as _QRect, Qt as _Qt
+            p.drawText(_QRect(0, 0, size, size), int(_Qt.AlignmentFlag.AlignCenter), letter)
+        elif shape_key == 'ellipse':
+            # Filled circle for ellipse
+            p.setBrush(QBrush(QColor('#42a5f5')))
+            m = int(size * 0.20)
+            p.drawEllipse(m, m, size - 2*m, size - 2*m)
+            # white border
+            p.setPen(QPen(QColor(255,255,255), size * 0.06))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(m, m, size - 2*m, size - 2*m)
+        elif shape_key == 'text':
+            # Badge with 'A' for text annotation
+            p.setBrush(QBrush(QColor('#66bb6a')))
+            m = int(size * 0.18)
+            p.drawRoundedRect(m, m, size - 2*m, size - 2*m, size*0.12, size*0.12)
+            p.setPen(QPen(QColor(255,255,255)))
+            font = QFont()
+            font.setBold(True)
+            font.setPixelSize(int(size * 0.42))
+            p.setFont(font)
+            from PyQt6.QtCore import QRect as _QRect, Qt as _Qt
+            p.drawText(_QRect(0, 0, size, size), int(_Qt.AlignmentFlag.AlignCenter), 'A')
+        else:
+            # Filled square for rectangle/others
+            p.setBrush(QBrush(QColor('#26a69a')))
+            m = int(size * 0.20)
+            p.drawRect(m, m, size - 2*m, size - 2*m)
+            # white border
+            p.setPen(QPen(QColor(255,255,255), size * 0.06))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(m, m, size - 2*m, size - 2*m)
+        p.end()
+        return QIcon(pm)
+
+    def _roi_type_label(self, shape: Optional[str], algo: Optional[str]) -> str:
+        algo_key = (algo or '').lower()
+        shape_key = (shape or '').lower()
+        if algo_key == 'otsu':
+            return 'Auto ROI (Otsu)'
+        if algo_key == 'threshold':
+            return 'Auto ROI (Manual Threshold)'
+        if algo_key == 'composite':
+            return 'Composite ROI'
+        if shape_key == 'ellipse':
+            return 'Circle ROI'
+        if shape_key == 'text':
+            return 'Text Annotation'
+        if shape_key == 'contour':
+            return 'Contour ROI'
+        return 'Rectangle ROI'
 
     def update_spinners_from_roi(self, roi: QRect):
         self.roi_x_spin.blockSignals(True)
