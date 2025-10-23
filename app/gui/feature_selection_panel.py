@@ -37,6 +37,9 @@ class FeatureSelectionPanel(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
+        # Match top gap with Preview panel so all columns align
+        main_layout.setContentsMargins(0, 5, 0, 0)
+        main_layout.setSpacing(6)
         
         feature_group = QGroupBox("Feature Extraction")
         feature_layout = QVBoxLayout(feature_group)

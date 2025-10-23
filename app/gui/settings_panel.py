@@ -6,9 +6,9 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QFormLayout,
                              QSlider, QComboBox, QPushButton, QSpinBox, QLabel,
                              QSizePolicy, QFileDialog, QHBoxLayout, QCheckBox, 
                              QListWidget, QListWidgetItem, QLineEdit, QColorDialog,
-                             QToolButton, QFrame, QInputDialog)
+                             QToolButton, QFrame, QInputDialog, QSpacerItem)
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QTimer
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtGui import QColor, QIcon, QFontMetrics, QPixmap, QImage
 
 class SettingsPanel(QWidget):
     settingsChanged = pyqtSignal()
@@ -49,6 +49,14 @@ class SettingsPanel(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
+        # Align the top of this panel with the Preview panel (minimal top gap)
+        main_layout.setContentsMargins(0, 5, 0, 0)
+        # Increase vertical spacing between each section to roughly one line height
+        try:
+            fm = QFontMetrics(self.font())
+            main_layout.setSpacing(max(8, fm.height()))
+        except Exception:
+            main_layout.setSpacing(12)
 
         # --- Overlay Settings Group ---
         overlay_group = QGroupBox("Overlay Settings")
@@ -66,7 +74,9 @@ class SettingsPanel(QWidget):
         self.transparency_slider.valueChanged.connect(self.transparency_spinbox.setValue)
         self.transparency_spinbox.valueChanged.connect(self.transparency_slider.setValue)
         self.transparency_slider.valueChanged.connect(self.settingsChanged.emit)
-        overlay_layout.addRow("FL Transparency:", transparency_layout)
+        # Two-line slider layout: label row, then controls row
+        overlay_layout.addRow(QLabel("FL Transparency:"))
+        overlay_layout.addRow(transparency_layout)
         self.lut_combo = QComboBox()
         colormaps = [
             'hot', 'viridis', 'inferno', 'magma', 'cividis', 'gray', 'jet',
@@ -83,6 +93,10 @@ class SettingsPanel(QWidget):
         # --- Normalization Settings Group ---
         norm_group = QGroupBox("Intensity Range (Normalization)")
         norm_layout = QFormLayout(norm_group)
+        norm_layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        norm_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        norm_layout.setHorizontalSpacing(8)
+        norm_layout.setVerticalSpacing(4)
         self.min_intensity_spinbox = QSpinBox()
         self.min_intensity_spinbox.setRange(0, 65535)
         self.min_intensity_spinbox.setValue(100)
@@ -98,19 +112,79 @@ class SettingsPanel(QWidget):
 
         # --- Registration Settings Group ---
         reg_group = QGroupBox("Registration")
-        reg_layout = QVBoxLayout(reg_group)
+        reg_hlayout = QHBoxLayout(reg_group)
+        reg_hlayout.setContentsMargins(8, 8, 8, 8)
+        reg_hlayout.setSpacing(10)
+
+        # Left: thumbnail preview of the selected template
+        self.template_thumb_label = QLabel()
+        self.template_thumb_label.setMinimumWidth(110)
+        self.template_thumb_label.setMaximumWidth(160)
+        self.template_thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.template_thumb_label.setStyleSheet("background-color: #222; border: 1px solid #555;")
+        reg_hlayout.addWidget(self.template_thumb_label, 0)
+
+        # Right: controls stack (checkbox, load button, path label)
+        self._reg_right_widget = QWidget()
+        reg_vlayout = QVBoxLayout(self._reg_right_widget)
+        reg_vlayout.setContentsMargins(0, 0, 0, 0)
+        reg_vlayout.setSpacing(6)
+
         self.reg_checkbox = QCheckBox("Enable Centering / Registration")
         self.reg_checkbox.setChecked(False)
         self.reg_checkbox.toggled.connect(self.toggle_registration_widgets)
-        reg_layout.addWidget(self.reg_checkbox)
-        self.load_template_button = QPushButton("Load Reference Template...")
+        reg_vlayout.addWidget(self.reg_checkbox)
+
+        self.load_template_button = QPushButton("Load Reference Template…")
+        self.load_template_button.setFixedWidth(200)  # slightly narrower to make room for thumbnail
+        # Subtle styling to make the button distinct without flashy colors
+        self.load_template_button.setMinimumHeight(28)
+        self.load_template_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2e2e2e;
+                border: 1px solid #5a5a5a;
+                border-radius: 4px;
+                padding: 6px 10px;
+                color: #e0e0e0;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #6a6a6a;
+            }
+            QPushButton:pressed {
+                background-color: #252525;
+                border-color: #555555;
+            }
+            QPushButton:disabled {
+                background-color: #1f1f1f;
+                color: #777777;
+                border-color: #333333;
+            }
+            """
+        )
         self.load_template_button.clicked.connect(self._load_template)
+        reg_vlayout.addWidget(self.load_template_button)
+        # Increase the gap between the button and the file name label
+        try:
+            fm_btn = QFontMetrics(self.font())
+            reg_vlayout.addSpacing(max(10, fm_btn.height()))
+        except Exception:
+            reg_vlayout.addSpacing(12)
+
         self.template_label = QLabel("No template loaded.")
-        self.template_label.setWordWrap(True)
-        reg_layout.addWidget(self.load_template_button)
-        reg_layout.addWidget(self.template_label)
+        self.template_label.setWordWrap(False)
+        self.template_label.setToolTip("")
+        reg_vlayout.addWidget(self.template_label)
+
+        reg_vlayout.addStretch(1)
+        reg_hlayout.addWidget(self._reg_right_widget, 1)
+
         main_layout.addWidget(reg_group)
         self.reg_group = reg_group
+        self._template_label_full = ""
+        # After layout settles, make the registration section ~20% taller
+        self._schedule_adjust_reg_group_height()
 
         # --- Timestamp Watermark Group (compact + enable toggle) ---
         watermark_group = QGroupBox("Timestamp Watermark")
@@ -195,9 +269,10 @@ class SettingsPanel(QWidget):
         self.crop_mask_slider.valueChanged.connect(self.crop_mask_spin.setValue)
         self.crop_mask_spin.valueChanged.connect(self.crop_mask_slider.setValue)
         self.crop_mask_slider.valueChanged.connect(self.settingsChanged.emit)
-        mask_row.addWidget(QLabel("Mask opacity:"))
         mask_row.addWidget(self.crop_mask_slider, 1)
         mask_row.addWidget(self.crop_mask_spin)
+        # Two-line slider layout
+        form_layout_roi.addRow(QLabel("Mask opacity:"))
         form_layout_roi.addRow(mask_row_w)
 
         self.roi_x_spin = QSpinBox()
@@ -207,30 +282,52 @@ class SettingsPanel(QWidget):
         for spinbox in [self.roi_x_spin, self.roi_y_spin, self.roi_w_spin, self.roi_h_spin]:
             spinbox.setRange(0, 8192)
 
-        row1w = QWidget()
-        row1 = QHBoxLayout(row1w)
-        row1.setContentsMargins(0, 0, 0, 0)
-        row1.setSpacing(8)
-        row1.addWidget(QLabel("X:"))
-        row1.addWidget(self.roi_x_spin)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("Y:"))
-        row1.addWidget(self.roi_y_spin)
-        row1.addStretch(1)
+        # Arrange X/Y on first line, W/H on second line, with columns perfectly aligned
+        xywh_row_w = QWidget()
+        from PyQt6.QtWidgets import QGridLayout
+        xywh_grid = QGridLayout(xywh_row_w)
+        xywh_grid.setContentsMargins(0, 0, 0, 0)
+        xywh_grid.setHorizontalSpacing(8)
+        xywh_grid.setVerticalSpacing(4)
 
-        row2w = QWidget()
-        row2 = QHBoxLayout(row2w)
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(8)
-        row2.addWidget(QLabel("W:"))
-        row2.addWidget(self.roi_w_spin)
-        row2.addSpacing(12)
-        row2.addWidget(QLabel("H:"))
-        row2.addWidget(self.roi_h_spin)
-        row2.addStretch(1)
+        x_lbl = QLabel("X:")
+        y_lbl = QLabel("Y:")
+        w_lbl = QLabel("W:")
+        h_lbl = QLabel("H:")
 
-        form_layout_roi.addRow(row1w)
-        form_layout_roi.addRow(row2w)
+        # Normalize label widths so spinboxes align regardless of character width
+        fm = QFontMetrics(self.font())
+        lab_w = max(fm.horizontalAdvance(t) for t in ["X:", "Y:", "W:", "H:"])
+        for lbl in (x_lbl, y_lbl, w_lbl, h_lbl):
+            lbl.setFixedWidth(lab_w)
+
+        # Ensure spin boxes show at least 5 digits comfortably
+        for sb in (self.roi_x_spin, self.roi_y_spin, self.roi_w_spin, self.roi_h_spin):
+            try:
+                sb.setMinimumContentsLength(5)
+            except Exception:
+                # Fallback: set a reasonable minimum width based on font metrics
+                sb.setMinimumWidth(fm.horizontalAdvance("00000") + 24)
+
+        # Add a dedicated spacer column between the X and Y (and W and H) pairs
+        pair_gap_px = fm.horizontalAdvance("000000")  # ~6-digit gap between pairs
+        xywh_grid.setColumnMinimumWidth(2, pair_gap_px)
+
+        # Row 0: X | X-spin | [gap] | Y | Y-spin
+        xywh_grid.addWidget(x_lbl, 0, 0)
+        xywh_grid.addWidget(self.roi_x_spin, 0, 1)
+        xywh_grid.addItem(QSpacerItem(pair_gap_px, 1, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed), 0, 2)
+        xywh_grid.addWidget(y_lbl, 0, 3)
+        xywh_grid.addWidget(self.roi_y_spin, 0, 4)
+        # Row 1: W | W-spin | [gap] | H | H-spin
+        xywh_grid.addWidget(w_lbl, 1, 0)
+        xywh_grid.addWidget(self.roi_w_spin, 1, 1)
+        xywh_grid.addItem(QSpacerItem(pair_gap_px, 1, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed), 1, 2)
+        xywh_grid.addWidget(h_lbl, 1, 3)
+        xywh_grid.addWidget(self.roi_h_spin, 1, 4)
+
+        # Add the 2x2 grid as a single row in the form for clean left alignment
+        form_layout_roi.addRow(xywh_row_w)
         self.roi_x_spin.valueChanged.connect(self._update_roi_from_spinners)
         self.roi_y_spin.valueChanged.connect(self._update_roi_from_spinners)
         self.roi_w_spin.valueChanged.connect(self._update_roi_from_spinners)
@@ -288,7 +385,9 @@ class SettingsPanel(QWidget):
         thresh_row.addWidget(self.outline_thresh_slider, 1)
         thresh_row.addWidget(self.outline_thresh_spin)
         self._outline_threshold_row = thresh_row_w
-        outline_form.addRow("Threshold:", self._outline_threshold_row)
+        # Two-line slider layout
+        outline_form.addRow(QLabel("Threshold:"))
+        outline_form.addRow(self._outline_threshold_row)
 
         otsu_row_w = QWidget()
         otsu_row = QHBoxLayout(otsu_row_w)
@@ -307,7 +406,9 @@ class SettingsPanel(QWidget):
         otsu_row.addWidget(self.outline_otsu_boost_slider, 1)
         otsu_row.addWidget(self.outline_otsu_boost_spin)
         self._outline_otsu_row = otsu_row_w
-        outline_form.addRow("Otsu boost:", self._outline_otsu_row)
+        # Two-line slider layout
+        outline_form.addRow(QLabel("Otsu boost:"))
+        outline_form.addRow(self._outline_otsu_row)
 
         color_row_w = QWidget()
         color_row = QHBoxLayout(color_row_w)
@@ -1262,11 +1363,17 @@ class SettingsPanel(QWidget):
         """Enable/disable registration widgets based on the checkbox."""
         self.load_template_button.setEnabled(checked)
         self.template_label.setEnabled(checked)
+        self.template_thumb_label.setEnabled(checked)
         if not checked:
             self.template_label.setText("Registration disabled.")
             if self.template_path is not None:
                 self.template_path = None
                 self.templatePathChanged.emit(None) # Notify main window
+            # Clear thumbnail when disabled
+            try:
+                self.template_thumb_label.clear()
+            except Exception:
+                pass
         else:
             self.template_label.setText("No template loaded.")
 
@@ -1295,9 +1402,13 @@ class SettingsPanel(QWidget):
         filepath, _ = QFileDialog.getOpenFileName(self, "Select Template Image", "", "Image Files (*.tif *.tiff *.png)")
         if filepath:
             self.template_path = filepath
-            self.template_label.setText(f"Loaded: {os.path.basename(filepath)}")
-            # --- FIX: No longer need to manage start button state here ---
+            # Store full path and display elided version (show end of path)
+            self._template_label_full = filepath
+            self.template_label.setToolTip(filepath)
+            self._update_template_label_elided()
             self.templatePathChanged.emit(self.template_path)
+            # Update thumbnail scaled to available height
+            self._schedule_update_template_thumbnail()
 
     def _link_phase_controls(self):
         """Links the sliders and spinboxes for the phase cutoffs."""
@@ -1388,12 +1499,19 @@ class SettingsPanel(QWidget):
         template_path = data.get("template_path")
         if template_path and os.path.exists(template_path):
             self.template_path = template_path
-            self.template_label.setText(f"Loaded: {os.path.basename(template_path)}")
+            self._template_label_full = template_path
+            self.template_label.setToolTip(template_path)
+            self._update_template_label_elided()
             self.templatePathChanged.emit(self.template_path)
+            self._schedule_update_template_thumbnail()
         else:
             self.template_path = None
             self.template_label.setText("No template loaded.")
             self.templatePathChanged.emit(None)
+            try:
+                self.template_thumb_label.clear()
+            except Exception:
+                pass
 
         # Timestamp watermark
         if hasattr(self, 'watermark_enabled_chk'):
@@ -1458,6 +1576,100 @@ class SettingsPanel(QWidget):
             self.settingsChanged.emit()
         except Exception:
             pass
+
+    # --- Registration template helpers ---
+    def _update_template_label_elided(self):
+        """Elide the template path from the left so the end (file name) is visible."""
+        try:
+            full = getattr(self, '_template_label_full', '') or ''
+            if not full:
+                return
+            w = max(10, self.template_label.width() - 4)
+            fm = QFontMetrics(self.template_label.font())
+            elided = fm.elidedText(full, Qt.TextElideMode.ElideLeft, w)
+            self.template_label.setText(elided)
+        except Exception:
+            pass
+
+    def _schedule_update_template_thumbnail(self):
+        try:
+            QTimer.singleShot(0, self._update_template_thumbnail)
+        except Exception:
+            self._update_template_thumbnail()
+
+    def _update_template_thumbnail(self):
+        """Load and scale the template image into the left thumbnail box.
+        Height matches the right-side controls stack height.
+        """
+        try:
+            if not getattr(self, 'template_path', None) or not os.path.exists(self.template_path):
+                self.template_thumb_label.clear()
+                return
+            # Determine available height from right-widget (controls area)
+            target_h = max(50, self._reg_right_widget.height())
+            # Load image (try QPixmap first; fallback to tifffile)
+            pix = QPixmap()
+            if not pix.load(self.template_path):
+                try:
+                    from tifffile import imread
+                    import numpy as np
+                    img = imread(self.template_path)
+                    # Normalize to 8-bit for preview
+                    arr = img
+                    if arr.ndim == 3 and arr.shape[2] in (3,4):
+                        # assume already 8-bit compatible
+                        pass
+                    else:
+                        arr = (255 * (arr.astype('float32') - arr.min()) / max(1.0, (arr.max() - arr.min()))).clip(0,255).astype('uint8')
+                    if arr.ndim == 2:
+                        h, w = arr.shape
+                        qimg = QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+                    else:
+                        h, w = arr.shape[:2]
+                        if not arr.flags['C_CONTIGUOUS']:
+                            arr = np.ascontiguousarray(arr)
+                        qimg = QImage(arr.data, w, h, 3*w, QImage.Format.Format_RGB888)
+                    pix = QPixmap.fromImage(qimg)
+                except Exception:
+                    pix = QPixmap()
+            if pix.isNull():
+                self.template_thumb_label.clear()
+                return
+            scaled = pix.scaled(self.template_thumb_label.maximumWidth(), target_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.template_thumb_label.setPixmap(scaled)
+        except Exception:
+            try:
+                self.template_thumb_label.clear()
+            except Exception:
+                pass
+
+    def _schedule_adjust_reg_group_height(self):
+        """Schedule a one-shot adjustment to make the Registration group ~20% taller.
+        Runs after the initial layout is calculated so sizeHint is valid.
+        """
+        try:
+            QTimer.singleShot(0, self._adjust_reg_group_height)
+        except Exception:
+            self._adjust_reg_group_height()
+
+    def _adjust_reg_group_height(self):
+        try:
+            if not hasattr(self, 'reg_group') or self.reg_group is None:
+                return
+            h = max(1, self.reg_group.sizeHint().height())
+            target = int(h * 1.2)
+            if self.reg_group.minimumHeight() < target:
+                self.reg_group.setMinimumHeight(target)
+            # Rescale thumbnail to the new height
+            self._schedule_update_template_thumbnail()
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep the elided label and thumbnail up to date on resize
+        self._update_template_label_elided()
+        self._schedule_update_template_thumbnail()
 
     # --- Helpers for outline color ---
     def _set_outline_color(self, color: QColor):

@@ -22,6 +22,9 @@ class AnalysisPanel(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
+        # Keep the top gap consistent with the Preview panel so columns line up
+        main_layout.setContentsMargins(0, 5, 0, 0)
+        main_layout.setSpacing(6)
         
         load_group = QGroupBox("Load Data for Analysis")
         load_layout = QVBoxLayout(load_group)

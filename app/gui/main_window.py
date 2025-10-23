@@ -214,6 +214,8 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        # Normalize vertical spacing between the Paths group and the panels below
+        main_layout.setSpacing(5)
 
         dir_group = QGroupBox("Paths")
         # Compact the layout and controls to save vertical space
@@ -225,6 +227,35 @@ class MainWindow(QMainWindow):
         input_dir_layout = QHBoxLayout()
         self.dir_button = QPushButton("Select Data…")
         self.dir_button.setFixedWidth(160)
+        # Tooltip + subtle styling for directory chooser
+        try:
+            self.dir_button.setToolTip("Choose the main data folder containing WF and FL TIFF images")
+            _subtle_btn_style = (
+                "\n"
+                "QPushButton {\n"
+                "    background-color: #2e2e2e;\n"
+                "    border: 1px solid #5a5a5a;\n"
+                "    border-radius: 4px;\n"
+                "    padding: 6px 10px;\n"
+                "    color: #e0e0e0;\n"
+                "}\n"
+                "QPushButton:hover {\n"
+                "    background-color: #3a3a3a;\n"
+                "    border-color: #6a6a6a;\n"
+                "}\n"
+                "QPushButton:pressed {\n"
+                "    background-color: #252525;\n"
+                "    border-color: #555555;\n"
+                "}\n"
+                "QPushButton:disabled {\n"
+                "    background-color: #1f1f1f;\n"
+                "    color: #777777;\n"
+                "    border-color: #333333;\n"
+                "}\n"
+            )
+            self.dir_button.setStyleSheet(_subtle_btn_style)
+        except Exception:
+            pass
         self.dir_label = QLineEdit("Not selected.")
         self.dir_label.setToolTip("Selected main data directory. You can also paste a path here.")
         self.dir_label.setFixedHeight(26)
@@ -236,6 +267,12 @@ class MainWindow(QMainWindow):
         output_dir_layout = QHBoxLayout()
         self.out_dir_button = QPushButton("Select Output…")
         self.out_dir_button.setFixedWidth(160)
+        try:
+            self.out_dir_button.setToolTip("Choose the folder where processed outputs will be saved")
+            # Reuse the same subtle style
+            self.out_dir_button.setStyleSheet(_subtle_btn_style)
+        except Exception:
+            pass
         self.out_dir_label = QLineEdit("Not selected.")
         self.out_dir_label.setToolTip("Selected output directory. You can also paste a path here.")
         self.out_dir_label.setFixedHeight(26)
@@ -247,16 +284,32 @@ class MainWindow(QMainWindow):
         
         # The core_layout section ---
         core_layout = QHBoxLayout()
+        # Reduce horizontal gaps between left Settings and right Preview (and others)
+        core_layout.setContentsMargins(0, 0, 0, 0)
+        core_layout.setSpacing(8)
         # Settings panel wrapped in a scroll area to keep the main layout fixed height
         self.settings_panel = SettingsPanel()
-        self.settings_panel.setFixedWidth(350)
         self.settings_scroll = QScrollArea()
         self.settings_scroll.setWidget(self.settings_panel)
         self.settings_scroll.setWidgetResizable(True)
         self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.settings_scroll.setFrameShape(self.settings_scroll.Shape.NoFrame)
+        # Make the Settings column just wide enough for its content (dynamic with a safe minimum)
+        try:
+            hint_w = self.settings_panel.sizeHint().width()
+            # Add a small cushion for scrollbars/margins; enforce a reasonable minimum
+            w = max(360, hint_w + 12)
+            self.settings_scroll.setFixedWidth(w)
+        except Exception:
+            # Fallback width if size hint isn't available yet
+            self.settings_scroll.setFixedWidth(380)
+        # Wrap Settings column in a titled group to align titles across columns
+        settings_group = QGroupBox("Settings")
+        settings_group_layout = QVBoxLayout(settings_group)
+        settings_group_layout.setContentsMargins(0, 5, 0, 0)
+        settings_group_layout.addWidget(self.settings_scroll)
 
-        # Wrap PreviewPanel in a titled QGroupBox ---
+    # Wrap PreviewPanel in a titled QGroupBox ---
         self.preview_panel = PreviewPanel()
         preview_group = QGroupBox("Live Preview")
         preview_group_layout = QVBoxLayout(preview_group)
@@ -266,13 +319,26 @@ class MainWindow(QMainWindow):
 
         self.feature_panel = FeatureSelectionPanel()
         self.feature_panel.setFixedWidth(300)
+        # Wrap Feature column in a titled group to align with Preview
+        feature_group = QGroupBox("Feature Selection")
+        feature_group_layout = QVBoxLayout(feature_group)
+        feature_group_layout.setContentsMargins(0, 5, 0, 0)
+        feature_group_layout.addWidget(self.feature_panel)
+
         self.analysis_panel = AnalysisPanel()
         self.analysis_panel.setFixedWidth(500)
+        # Wrap Analysis column in a titled group to align with Preview
+        analysis_group = QGroupBox("Analysis")
+        analysis_group_layout = QVBoxLayout(analysis_group)
+        analysis_group_layout.setContentsMargins(0, 5, 0, 0)
+        analysis_group_layout.addWidget(self.analysis_panel)
         
-        core_layout.addWidget(self.settings_scroll)
-        core_layout.addWidget(preview_group, 1) # Add the group box instead of the panel directly
-        core_layout.addWidget(self.feature_panel)
-        core_layout.addWidget(self.analysis_panel)
+        # Reduce horizontal gaps between columns further and let Preview expand
+        core_layout.setSpacing(4)
+        core_layout.addWidget(settings_group)
+        core_layout.addWidget(preview_group, 1) # Preview gets stretch to occupy free space
+        core_layout.addWidget(feature_group)
+        core_layout.addWidget(analysis_group)
         
         main_layout.addLayout(core_layout)
 
@@ -285,22 +351,42 @@ class MainWindow(QMainWindow):
         # Left: control buttons
         self.control_start_btn = QPushButton("Start Processing")
         self.control_start_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        try:
+            self.control_start_btn.setToolTip("Begin batch processing using the current settings and ROI")
+        except Exception:
+            pass
         self.control_start_btn.clicked.connect(self.run_processing)
 
         self.control_pause_btn = QPushButton("Pause")
         self.control_pause_btn.setStyleSheet("background-color: #FFA000; color: white; font-weight: bold;")
+        try:
+            self.control_pause_btn.setToolTip("Pause processing; you can resume later")
+        except Exception:
+            pass
         self.control_pause_btn.clicked.connect(self.pause_processing)
 
         self.control_abort_btn = QPushButton("Abort")
         self.control_abort_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold;")
+        try:
+            self.control_abort_btn.setToolTip("Abort processing immediately; partial outputs may be incomplete")
+        except Exception:
+            pass
         self.control_abort_btn.clicked.connect(self.request_abort_processing)
 
         self.control_resume_btn = QPushButton("Resume")
         self.control_resume_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        try:
+            self.control_resume_btn.setToolTip("Resume processing from the paused state")
+        except Exception:
+            pass
         self.control_resume_btn.clicked.connect(self.resume_processing)
 
         self.control_stop_btn = QPushButton("Stop")
         self.control_stop_btn.setStyleSheet("background-color: #9E9E9E; color: white; font-weight: bold;")
+        try:
+            self.control_stop_btn.setToolTip("Stop processing gracefully after the current unit of work")
+        except Exception:
+            pass
         self.control_stop_btn.clicked.connect(self.stop_processing)
 
         footer_layout.addWidget(self.control_start_btn)

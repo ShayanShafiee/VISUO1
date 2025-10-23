@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLay
                              QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
                              QGraphicsView, QGraphicsScene, QInputDialog)
 from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor, QFont
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QRectF, QTimer, QPoint, QPointF, QSize
 from typing import Optional
 
 from .interactive_roi import InteractiveROI
@@ -119,6 +119,42 @@ class ZoomableImageView(QGraphicsView):
         self._zoom_factor = 1.0
         self._apply_zoom()
 
+    def set_total_scale(self, desired_scale: float):
+        """Set an absolute total scale (viewport pixels per scene unit),
+        respecting min/max zoom constraints. This adjusts internal zoom_factor
+        relative to the current base-fit scale.
+        """
+        if desired_scale <= 0:
+            return
+        # Compute required zoom_factor relative to base fit
+        if self._base_fit_scale <= 0:
+            self._update_fit_scale()
+        if self._base_fit_scale <= 0:
+            return
+        z = desired_scale / self._base_fit_scale
+        self._zoom_factor = max(self._min_zoom, min(self._max_zoom, z))
+        self._apply_zoom()
+
+    def zoom_to_scene_rect(self, rect: QRectF, padding_px: int = 5):
+        """Zoom and center so that the given scene rect fits entirely within
+        the viewport, leaving padding_px on each side in viewport pixels.
+        """
+        if rect is None or rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        vw = max(1, self.viewport().width())
+        vh = max(1, self.viewport().height())
+        pad = max(0, int(padding_px))
+        avail_w = max(1, vw - 2 * pad)
+        avail_h = max(1, vh - 2 * pad)
+        # Desired total scale in viewport px per scene unit
+        sx = avail_w / rect.width()
+        sy = avail_h / rect.height()
+        desired_scale = min(sx, sy)
+        self.set_total_scale(desired_scale)
+        # Center on the rect center
+        from PyQt6.QtCore import QPointF
+        self.centerOn(QPointF(rect.center()))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # When the viewport resizes, recompute base fit and reapply zoom so fit/home works
@@ -140,7 +176,7 @@ COLOR_MAP = {
 
 class TimestampOverlay(QWidget):
     """A transparent, mouse-pass-through overlay pinned to the viewport that draws
-    a small timestamp text box in the top-left of the visible area (screen space),
+    a small timestamp text box in the bottom-right of the visible area (screen space),
     unaffected by zoom or pan.
     """
     def __init__(self, parent=None):
@@ -252,12 +288,9 @@ class RegistrationInfoBar(QWidget):
             p.drawLine(mx - cross_len, my, mx + cross_len, my)
             p.drawLine(mx, my - cross_len, mx, my + cross_len)
 
-        # Text area to the right (fixed columns so values don't shift positions)
+        # Text area to the right (fixed columns, left-aligned, wide enough for 5 digits)
         p.setPen(QPen(self._fg))
-        text_x = margin + schem_w + 10
-        text_rect = QRect(text_x, 0, self.width() - (text_x + 10), h)
-        col_w = max(1, text_rect.width() // 3)
-        # Use delta symbol and fixed-sign formatting; optional monospace hint for stability
+        # Use a monospace-ish font for stability
         try:
             f = QFont(self.font())
             f.setStyleHint(QFont.StyleHint.Monospace)
@@ -265,13 +298,27 @@ class RegistrationInfoBar(QWidget):
             p.setFont(f)
         except Exception:
             pass
+        # Compute column width to accommodate labels with up to 5 digits
+        from PyQt6.QtGui import QFontMetrics
+        fm = QFontMetrics(p.font())
+        # Left gutter between schematic and first field: width of 5 digits
+        left_gutter = fm.horizontalAdvance("000")
+        text_x = margin + schem_w + left_gutter
+        text_rect = QRect(text_x, 0, self.width() - (text_x + 10), h)
+        sample_dx = "Δx: +123.0"
+        sample_dy = "Δy: +123.0"
+        sample_th = "θ: +123.0°"
+        col_w = max(fm.horizontalAdvance(s) for s in (sample_dx, sample_dy, sample_th)) + 8
+        # Gap between columns equal to width of 5 digits
+        gutter = fm.horizontalAdvance("0")
         cols = [
             f"Δx: {self._dx:+.1f}",
             f"Δy: {self._dy:+.1f}",
             f"θ: {self._theta:+.1f}°",
         ]
         for i, t in enumerate(cols):
-            col_rect = QRect(text_rect.x() + i * col_w, text_rect.y(), col_w, text_rect.height())
+            x = text_rect.x() + i * (col_w + gutter)
+            col_rect = QRect(x, text_rect.y(), col_w, text_rect.height())
             p.drawText(col_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, t)
         p.end()
 
@@ -396,24 +443,57 @@ class PreviewPanel(QWidget):
         zoom_layout = QHBoxLayout()
         self.zoom_out_btn = QPushButton("")
         self.zoom_home_btn = QPushButton("")
+        self.zoom_fit_crop_btn = QPushButton("")
         self.zoom_in_btn = QPushButton("")
         # Use square buttons with icon-only layout
-        for b in (self.zoom_out_btn, self.zoom_home_btn, self.zoom_in_btn):
+        for b in (self.zoom_out_btn, self.zoom_home_btn, self.zoom_fit_crop_btn, self.zoom_in_btn):
             b.setFixedSize(36, 36)
             b.setIconSize(QSize(22, 22))
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Subtle, consistent hover/pressed styling for icon buttons
+        _icon_btn_style = (
+            "\n"
+            "QPushButton {\n"
+            "    background-color: #2e2e2e;\n"
+            "    border: 1px solid #5a5a5a;\n"
+            "    border-radius: 4px;\n"
+            "    color: #e0e0e0;\n"
+            "}\n"
+            "QPushButton:hover {\n"
+            "    background-color: #3a3a3a;\n"
+            "    border-color: #6a6a6a;\n"
+            "}\n"
+            "QPushButton:pressed {\n"
+            "    background-color: #252525;\n"
+            "    border-color: #555555;\n"
+            "}\n"
+            "QPushButton:disabled {\n"
+            "    background-color: #1f1f1f;\n"
+            "    color: #777777;\n"
+            "    border-color: #333333;\n"
+            "}\n"
+        )
+        for b in (self.zoom_out_btn, self.zoom_home_btn, self.zoom_fit_crop_btn, self.zoom_in_btn):
+            try:
+                b.setStyleSheet(_icon_btn_style)
+            except Exception:
+                pass
         # Apply custom-drawn icons
         self.zoom_out_btn.setIcon(self._make_zoom_icon(plus=False))
-        self.zoom_out_btn.setToolTip("Zoom Out")
+        self.zoom_out_btn.setToolTip("Zoom Out — Decrease magnification of the image view")
         self.zoom_in_btn.setIcon(self._make_zoom_icon(plus=True))
-        self.zoom_in_btn.setToolTip("Zoom In")
+        self.zoom_in_btn.setToolTip("Zoom In — Increase magnification of the image view")
         self.zoom_home_btn.setIcon(self._make_home_icon())
-        self.zoom_home_btn.setToolTip("Reset (Home)")
+        self.zoom_home_btn.setToolTip("Reset (Home) — Fit the full image to the viewport")
+        self.zoom_fit_crop_btn.setIcon(self._make_fit_crop_icon())
+        self.zoom_fit_crop_btn.setToolTip("Fit to Crop — Zoom to keep the entire cropping ROI visible with ~5px padding")
         self.zoom_out_btn.clicked.connect(self.zoom_out)
         self.zoom_in_btn.clicked.connect(self.zoom_in)
         self.zoom_home_btn.clicked.connect(self.zoom_home)
+        self.zoom_fit_crop_btn.clicked.connect(self.zoom_to_crop)
         zoom_layout.addWidget(self.zoom_out_btn)
         zoom_layout.addWidget(self.zoom_home_btn)
+        zoom_layout.addWidget(self.zoom_fit_crop_btn)
         zoom_layout.addWidget(self.zoom_in_btn)
         zoom_layout.addStretch(1)
         top_level_layout.addLayout(zoom_layout)
@@ -468,6 +548,45 @@ class PreviewPanel(QWidget):
         self.random_button = QPushButton("↻ Random")
         self.next_button = QPushButton("▶ Next")
         self.select_button = QPushButton("📂 Select Specific...")
+
+        # Add descriptive tooltips for navigation
+        try:
+            self.prev_button.setToolTip("Load the previous WF/FL image pair (wraps around)")
+            self.random_button.setToolTip("Load a random WF/FL image pair from the dataset")
+            self.next_button.setToolTip("Load the next WF/FL image pair (wraps around)")
+            self.select_button.setToolTip("Choose a specific file and jump to its corresponding WF/FL pair")
+        except Exception:
+            pass
+
+        # Apply the same subtle hover styling to navigation buttons
+        _nav_btn_style = (
+            "\n"
+            "QPushButton {\n"
+            "    background-color: #2e2e2e;\n"
+            "    border: 1px solid #5a5a5a;\n"
+            "    border-radius: 4px;\n"
+            "    padding: 6px 10px;\n"
+            "    color: #e0e0e0;\n"
+            "}\n"
+            "QPushButton:hover {\n"
+            "    background-color: #3a3a3a;\n"
+            "    border-color: #6a6a6a;\n"
+            "}\n"
+            "QPushButton:pressed {\n"
+            "    background-color: #252525;\n"
+            "    border-color: #555555;\n"
+            "}\n"
+            "QPushButton:disabled {\n"
+            "    background-color: #1f1f1f;\n"
+            "    color: #777777;\n"
+            "    border-color: #333333;\n"
+            "}\n"
+        )
+        for b in (self.prev_button, self.random_button, self.next_button, self.select_button):
+            try:
+                b.setStyleSheet(_nav_btn_style)
+            except Exception:
+                pass
 
         self.prev_button.clicked.connect(self.requestPreviousImage.emit)
         self.random_button.clicked.connect(self.requestNewRandomImage.emit)
@@ -569,6 +688,38 @@ class PreviewPanel(QWidget):
         return QIcon(pm)
 
         # Add a stretch to the main vertical layout (keeps content aligned to top)
+
+    def _make_fit_crop_icon(self) -> QIcon:
+        """Create a simple 'fit to crop' icon: outer frame with inner ROI rectangle."""
+        size = 64
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(230, 230, 230))
+        pen.setWidthF(size * 0.06)
+        p.setPen(pen)
+        # Outer corners (like a crop frame)
+        m = int(size * 0.18)
+        l, t, r, b = m, m, size - m, size - m
+        seg = int(size * 0.16)
+        # top-left corner
+        p.drawLine(l, t, l + seg, t)
+        p.drawLine(l, t, l, t + seg)
+        # top-right corner
+        p.drawLine(r - seg, t, r, t)
+        p.drawLine(r, t, r, t + seg)
+        # bottom-left corner
+        p.drawLine(l, b - seg, l, b)
+        p.drawLine(l, b, l + seg, b)
+        # bottom-right corner
+        p.drawLine(r - seg, b, r, b)
+        p.drawLine(r, b - seg, r, b)
+        # Inner ROI rectangle
+        inner_margin = int(size * 0.28)
+        p.drawRect(inner_margin, inner_margin, size - 2*inner_margin, size - 2*inner_margin)
+        p.end()
+        return QIcon(pm)
 
     def update_roi_display(self, roi: QRect):
         """Update the on-screen ROI overlay based on a given image-space ROI.
@@ -764,6 +915,35 @@ class PreviewPanel(QWidget):
             self.image_view.zoom_home()
         self._rescale_ui()
 
+    def zoom_to_crop(self):
+        """Zoom and center the view to the current cropping ROI, leaving ~5px padding
+        on each side so crop lines remain visible. If aspect ratios differ, choose
+        the scale that keeps the entire crop visible.
+        """
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        # Determine ROI in scene coordinates (image pixels). Prefer canonical image ROI.
+        roi = None
+        try:
+            if self._image_roi is not None and self._image_roi.width() > 0 and self._image_roi.height() > 0:
+                roi = QRectF(self._image_roi)
+            else:
+                # Fallback: derive from current widget ROI mapping
+                r = self.get_roi()
+                if r and r.width() > 0 and r.height() > 0:
+                    roi = QRectF(r)
+        except Exception:
+            pass
+        if roi is None:
+            return
+        # Apply zoom-to-rect with padding
+        try:
+            self.image_view.zoom_to_scene_rect(roi, padding_px=5)
+        except Exception:
+            return
+        # Refresh overlays to sync with new transform
+        self._sync_overlay_to_view()
+
     def _sync_overlay_to_view(self):
         """Reposition ROI overlay to match current viewport and redraw ROI rectangle."""
         if self._updating_view:
@@ -792,8 +972,8 @@ class PreviewPanel(QWidget):
         self._update_timestamp_overlay()
 
     def _layout_top_overlays(self):
-        """Layout the timestamp and registration info overlays at the top of the viewport.
-        Timestamp occupies 1/5 width; registration bar uses remaining 4/5 with a small gap.
+        """Layout overlays so registration spans the full top width and timestamp sits at bottom-right.
+        This maximizes horizontal space for Δx/Δy/θ and eliminates clipping.
         """
         try:
             if not hasattr(self, 'image_view') or not hasattr(self, 'timestamp_overlay'):
@@ -802,14 +982,17 @@ class PreviewPanel(QWidget):
             vw = max(0, vp.width())
             if vw <= 0:
                 return
-            gap = 6  # few pixels gap
+            gap = 8  # edge gap
             bar_h = 36  # fixed bar height matching RegistrationInfoBar
-            ts_w = int(round(vw * 0.20))
-            reg_w = max(0, vw - ts_w - gap)
-            # Place at the very top-left of the viewport
-            self.timestamp_overlay.setGeometry(QRect(vp.x(), vp.y(), ts_w, bar_h))
+            # Full-width registration bar at the very top
             if hasattr(self, 'registration_overlay'):
-                self.registration_overlay.setGeometry(QRect(vp.x() + ts_w + gap, vp.y(), reg_w, bar_h))
+                self.registration_overlay.setGeometry(QRect(vp.x(), vp.y(), vw, bar_h))
+            # Timestamp box anchored to bottom-right
+            ts_h = 32
+            ts_w = min(max(160, int(round(vw * 0.24))), vw)  # responsive width with sensible min
+            ts_x = vp.x() + vw - ts_w - gap
+            ts_y = vp.y() + vp.height() - ts_h - gap
+            self.timestamp_overlay.setGeometry(QRect(ts_x, ts_y, ts_w, ts_h))
             # Keep them on top
             try:
                 self.timestamp_overlay.raise_()
