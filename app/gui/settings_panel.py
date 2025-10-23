@@ -27,6 +27,9 @@ class SettingsPanel(QWidget):
     addCompositeRoiRequested = pyqtSignal(object)  # payload: {'op': str, 'sources': List[int]}
     changeRoiPropertiesRequested = pyqtSignal(int, dict)
     changeCompositePropertiesRequested = pyqtSignal(int, dict)
+    # Overlay ROI management
+    addOverlayRoiRequested = pyqtSignal()
+    changeOverlayRoiPropertiesRequested = pyqtSignal(int, dict)
     renameRoiRequested = pyqtSignal(int, str)
     removeRoiRequested = pyqtSignal(int)
     toggleRoiVisibilityRequested = pyqtSignal(int, bool)
@@ -41,6 +44,8 @@ class SettingsPanel(QWidget):
         # Debounce timer for high-frequency controls (e.g., manual threshold)
         self._settings_debounce_timer: Optional[QTimer] = None
         self._init_ui()
+        # Provider hook for overlay preview thumbnails in the Overlay ROI dialog
+        self._overlay_preview_provider = None
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -323,6 +328,8 @@ class SettingsPanel(QWidget):
         color_row.addStretch(1)
         outline_form.addRow("Color:", color_row_w)
         main_layout.addWidget(outline_group)
+        # Hide Animal Outline panel from the Settings UI (feature disabled for now)
+        outline_group.hide()
         self.outline_group = outline_group
 
         # --- Annotations (Multi-ROIs) ---
@@ -600,6 +607,7 @@ class SettingsPanel(QWidget):
         menu.addSeparator()
         act_otsu = menu.addAction("Auto (Otsu)")
         act_thresh = menu.addAction("Manual Threshold")
+        act_overlay = menu.addAction("Overlay (FL+WF)")
         act_comp = menu.addAction("Composite (Combine ROIs)")
         act = menu.exec(self.add_roi_btn.mapToGlobal(self.add_roi_btn.rect().bottomLeft()))
         if act is None:
@@ -612,6 +620,8 @@ class SettingsPanel(QWidget):
             self.addAutoOtsuRoiRequested.emit()
         elif act == act_thresh:
             self.addThresholdRoiRequested.emit()
+        elif act == act_overlay:
+            self.addOverlayRoiRequested.emit()
         elif act == act_comp:
             cfg = self._open_composite_dialog(existing_props=None)
             if cfg is not None:
@@ -620,13 +630,18 @@ class SettingsPanel(QWidget):
     def _open_roi_properties(self, roi_id: int):
         s = self._roi_summaries_by_id.get(roi_id, {})
         algo = (s.get('algo') or '').lower()
-        if algo not in ('otsu', 'threshold', 'composite'):
+        if algo not in ('otsu', 'threshold', 'composite', 'overlay'):
             # No properties for geometric ROIs
             return
         if algo == 'composite':
             cfg = self._open_composite_dialog(existing_props=s, editing_roi_id=roi_id)
             if cfg is not None:
                 self.changeCompositePropertiesRequested.emit(roi_id, cfg)
+            return
+        if algo == 'overlay':
+            cfg = self._open_overlay_dialog(existing_props=s)
+            if cfg is not None:
+                self.changeOverlayRoiPropertiesRequested.emit(roi_id, cfg)
             return
         # Build a simple dialog using input widgets
         from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
@@ -659,6 +674,184 @@ class SettingsPanel(QWidget):
             else:
                 props['threshold'] = th_spin.value()
             self.changeRoiPropertiesRequested.emit(roi_id, props)
+
+    def set_overlay_preview_provider(self, provider_callable):
+        """MainWindow should call this with PreviewPanel.compute_overlay_preview.
+        The callable must accept a dict of params and return a QImage (or None).
+        """
+        self._overlay_preview_provider = provider_callable
+
+    def _open_overlay_dialog(self, existing_props: Optional[dict]) -> Optional[dict]:
+        """Dialog for editing Overlay ROI properties, including an inline overlay preview.
+        Returns a dict with overlay_* keys or None if canceled.
+        """
+        from PyQt6.QtWidgets import (
+            QDialog, QFormLayout, QDialogButtonBox, QHBoxLayout, QWidget, QComboBox, QSpinBox, QLabel, QSlider, QCheckBox
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Overlay ROI Properties (WF+FL)")
+        fl = QFormLayout(dlg)
+
+        # LUT selection
+        lut_combo = QComboBox(dlg)
+        colormaps = [
+            'hot', 'viridis', 'inferno', 'magma', 'cividis', 'gray', 'jet',
+            'tab10', 'tab20', 'tab20b', 'tab20c', 'Pastel1', 'Pastel2',
+            'Paired', 'Accent', 'Dark2', 'Set1', 'Set2', 'Set3', 'flag', 'prism', 'nipy_spectral'
+        ]
+        lut_combo.addItems(sorted(colormaps))
+        lut_combo.setCurrentText(str(existing_props.get('overlay_lut') or 'nipy_spectral'))
+        fl.addRow("FL LUT:", lut_combo)
+
+        # Min/Max intensity (maps FL to LUT before overlay)
+        min_spin = QSpinBox(dlg)
+        min_spin.setRange(0, 65535)
+        min_spin.setValue(int(existing_props.get('overlay_min') or 0))
+        max_spin = QSpinBox(dlg)
+        max_spin.setRange(0, 65535)
+        max_spin.setValue(int(existing_props.get('overlay_max') or 65535))
+        row_mm = QWidget(dlg)
+        row_mm_l = QHBoxLayout(row_mm); row_mm_l.setContentsMargins(0,0,0,0); row_mm_l.setSpacing(8)
+        row_mm_l.addWidget(QLabel("Min:")); row_mm_l.addWidget(min_spin)
+        row_mm_l.addWidget(QLabel("Max:")); row_mm_l.addWidget(max_spin)
+        fl.addRow("FL Intensity Range:", row_mm)
+
+        # Alpha (transparency) for FL over WF (slider + spinbox)
+        alpha_spin = QSpinBox(dlg)
+        alpha_spin.setRange(0, 100)
+        alpha_spin.setSuffix(" %")
+        alpha_spin.setValue(int(existing_props.get('overlay_alpha') or 40))
+        alpha_slider = QSlider(Qt.Orientation.Horizontal, dlg)
+        alpha_slider.setRange(0, 100)
+        alpha_slider.setValue(alpha_spin.value())
+        # Link slider/spin both ways
+        alpha_slider.valueChanged.connect(alpha_spin.setValue)
+        alpha_spin.valueChanged.connect(alpha_slider.setValue)
+        row_alpha = QWidget(dlg)
+        row_alpha_l = QHBoxLayout(row_alpha); row_alpha_l.setContentsMargins(0,0,0,0); row_alpha_l.setSpacing(8)
+        row_alpha_l.addWidget(alpha_slider, 1)
+        row_alpha_l.addWidget(alpha_spin)
+        fl.addRow("Overlay Transparency:", row_alpha)
+
+        # Smoothing options
+        sm_combo = QComboBox(dlg)
+        sm_combo.addItems(["None", "Gaussian", "Median"])  # store lowercase keys
+        prior_sm = str(existing_props.get('overlay_smooth_method') or 'none').lower()
+        sm_combo.setCurrentText('Gaussian' if prior_sm == 'gaussian' else ('Median' if prior_sm == 'median' else 'None'))
+        sm_k_spin = QSpinBox(dlg)
+        sm_k_spin.setRange(1, 21)
+        sm_k_spin.setSingleStep(2)
+        sm_k_spin.setValue(int(existing_props.get('overlay_smooth_ksize') or 3))
+        # Enforce odd on change
+        def _ensure_odd(v):
+            if v % 2 == 0:
+                sm_k_spin.setValue(v+1 if v < sm_k_spin.maximum() else v-1)
+        sm_k_spin.valueChanged.connect(_ensure_odd)
+        row_sm = QWidget(dlg)
+        row_sm_l = QHBoxLayout(row_sm); row_sm_l.setContentsMargins(0,0,0,0); row_sm_l.setSpacing(8)
+        row_sm_l.addWidget(QLabel("Method:")); row_sm_l.addWidget(sm_combo)
+        row_sm_l.addSpacing(8)
+        row_sm_l.addWidget(QLabel("Kernel:")); row_sm_l.addWidget(sm_k_spin)
+        fl.addRow("Smoothing:", row_sm)
+
+        # Keep largest blob toggle
+        keep_chk = QCheckBox("Keep only largest blob")
+        keep_chk.setChecked(bool(existing_props.get('overlay_keep_largest') if existing_props.get('overlay_keep_largest') is not None else True))
+        fl.addRow(keep_chk)
+
+        # Detection method on 8-bit overlay grayscale
+        method_combo = QComboBox(dlg)
+        method_combo.addItems(["Otsu", "Manual Threshold"])  # store as 'otsu'|'threshold'
+        # Normalize prior value to UI labels
+        prior_method = str(existing_props.get('overlay_method') or 'otsu').lower()
+        method_combo.setCurrentText('Otsu' if prior_method == 'otsu' else 'Manual Threshold')
+        fl.addRow("Detection Method:", method_combo)
+
+        # Manual threshold (0-255) and Otsu boost (0-50)
+        th_spin = QSpinBox(dlg)
+        th_spin.setRange(0, 255)
+        th_spin.setValue(int(existing_props.get('overlay_thresh') or 128))
+        boost_spin = QSpinBox(dlg)
+        boost_spin.setRange(0, 50)
+        boost_spin.setSuffix(" %")
+        boost_spin.setValue(int(existing_props.get('overlay_otsu_boost') or 10))
+        row_det = QWidget(dlg)
+        row_det_l = QHBoxLayout(row_det); row_det_l.setContentsMargins(0,0,0,0); row_det_l.setSpacing(8)
+        row_det_l.addWidget(QLabel("Thresh (0-255):")); row_det_l.addWidget(th_spin)
+        row_det_l.addSpacing(12)
+        row_det_l.addWidget(QLabel("Otsu boost:")); row_det_l.addWidget(boost_spin)
+        fl.addRow("Parameters:", row_det)
+
+        # Inline overlay preview (thumbnail)
+        preview_lbl = QLabel(dlg)
+        preview_lbl.setFixedSize(260, 260)
+        preview_lbl.setStyleSheet("background-color: #222; border: 1px solid #555;")
+        fl.addRow("Overlay Preview:", preview_lbl)
+
+        def current_params_dict():
+            method_key = 'otsu' if method_combo.currentText().lower().startswith('otsu') else 'threshold'
+            sm_key = sm_combo.currentText().strip().lower()
+            return {
+                'overlay_lut': lut_combo.currentText(),
+                'overlay_min': min_spin.value(),
+                'overlay_max': max_spin.value(),
+                'overlay_alpha': alpha_spin.value(),
+                'overlay_method': method_key,
+                'overlay_thresh': th_spin.value(),
+                'overlay_otsu_boost': boost_spin.value(),
+                'overlay_smooth_method': sm_key,
+                'overlay_smooth_ksize': sm_k_spin.value(),
+                'overlay_keep_largest': keep_chk.isChecked(),
+            }
+
+        def refresh_preview():
+            if not callable(self._overlay_preview_provider):
+                return
+            try:
+                qim = self._overlay_preview_provider(current_params_dict())
+                if qim is not None:
+                    from PyQt6.QtGui import QPixmap
+                    preview_lbl.setPixmap(QPixmap.fromImage(qim).scaled(preview_lbl.width(), preview_lbl.height(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            except Exception:
+                pass
+
+        # Update controls visibility and preview on method change
+        def update_det_visibility():
+            is_otsu = method_combo.currentText().lower().startswith('otsu')
+            th_spin.setEnabled(not is_otsu)
+            boost_spin.setEnabled(is_otsu)
+            refresh_preview()
+        method_combo.currentTextChanged.connect(lambda _=None: update_det_visibility())
+
+        # Hook value changes to refresh preview (lightweight debounce via singleShot)
+        from PyQt6.QtCore import QTimer
+        def schedule_refresh():
+            QTimer.singleShot(75, refresh_preview)
+        for w in (lut_combo, min_spin, max_spin, alpha_spin, alpha_slider, th_spin, boost_spin, sm_k_spin):
+            try:
+                if hasattr(w, 'valueChanged'):
+                    w.valueChanged.connect(schedule_refresh)
+            except Exception:
+                pass
+        try:
+            lut_combo.currentTextChanged.connect(schedule_refresh)
+            sm_combo.currentTextChanged.connect(schedule_refresh)
+        except Exception:
+            pass
+
+        # Initialize visibility and preview
+        update_det_visibility()
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        fl.addRow(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        return current_params_dict()
     
     def _open_composite_dialog(self, existing_props: Optional[dict], editing_roi_id: Optional[int] = None) -> Optional[dict]:
         """Dialog to create or edit a Composite ROI combining existing ROIs.
@@ -838,13 +1031,29 @@ class SettingsPanel(QWidget):
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(230,230,230))
-        pen.setWidthF(size*0.06)
-        p.setPen(pen)
-        # Palette outline (circle-ish)
+        # Draw a painter's palette with multiple colored swatches to clearly indicate "color"
+        outline_pen = QPen(QColor(230,230,230))
+        outline_pen.setWidthF(size*0.06)
+        p.setPen(outline_pen)
+        # Palette body
+        p.setBrush(QBrush(QColor(80, 80, 80)))
         p.drawEllipse(int(size*0.18), int(size*0.18), int(size*0.62), int(size*0.62))
         # Thumb hole
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(int(size*0.54), int(size*0.48), int(size*0.16), int(size*0.16))
+        # Color dots (rainbow-like swatches)
+        dot_r = int(size*0.08)
+        dots = [
+            (QColor('#ff5252'), (int(size*0.30), int(size*0.35))),  # red
+            (QColor('#ffca28'), (int(size*0.48), int(size*0.32))),  # yellow
+            (QColor('#66bb6a'), (int(size*0.58), int(size*0.46))),  # green
+            (QColor('#42a5f5'), (int(size*0.46), int(size*0.58))),  # blue
+            (QColor('#ab47bc'), (int(size*0.32), int(size*0.52))),  # purple
+        ]
+        for col, (cx, cy) in dots:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(col))
+            p.drawEllipse(cx - dot_r//2, cy - dot_r//2, dot_r, dot_r)
         p.end()
         return QIcon(pm)
 
@@ -902,29 +1111,59 @@ class SettingsPanel(QWidget):
         algo_key = (algo or '').lower()
         shape_key = (shape or '').lower()
 
-        if algo_key in ('otsu', 'threshold', 'composite'):
-            # Badge with letter (O/T)
-            if algo_key == 'otsu':
-                fill = QColor('#7e57c2')
-                letter = 'O'
-            elif algo_key == 'threshold':
-                fill = QColor('#fb8c00')
-                letter = 'T'
-            else:
-                fill = QColor('#29b6f6')
-                letter = 'C'
-            p.setBrush(QBrush(fill))
-            r = int(size * 0.18)
-            p.drawEllipse(r, r, size - 2*r, size - 2*r)
-            # Letter
-            p.setPen(QPen(QColor(255, 255, 255)))
-            font = QFont()
-            font.setBold(True)
-            font.setPixelSize(int(size * 0.46))
+        if algo_key == 'otsu':
+            # Auto: star/gear-like badge to suggest automatic detection
+            p.setBrush(QBrush(QColor('#7e57c2')))
+            import math
+            cx, cy = size//2, size//2
+            r_outer = int(size*0.32)
+            r_inner = int(size*0.18)
+            pts = []
+            for i in range(8):
+                ang = (math.pi/4) * i
+                pts.append((cx + int(r_outer*math.cos(ang)), cy + int(r_outer*math.sin(ang))))
+                ang2 = ang + (math.pi/8)
+                pts.append((cx + int(r_inner*math.cos(ang2)), cy + int(r_inner*math.sin(ang2))))
+            from PyQt6.QtCore import QPoint
+            poly = [QPoint(x,y) for x,y in pts]
+            p.drawPolygon(*poly)
+            # White 'O'
+            p.setPen(QPen(QColor(255,255,255)))
+            font = QFont(); font.setBold(True); font.setPixelSize(int(size*0.40))
             p.setFont(font)
-            # Center text
             from PyQt6.QtCore import QRect as _QRect, Qt as _Qt
-            p.drawText(_QRect(0, 0, size, size), int(_Qt.AlignmentFlag.AlignCenter), letter)
+            p.drawText(_QRect(0, 0, size, size), int(_Qt.AlignmentFlag.AlignCenter), 'O')
+        elif algo_key == 'threshold':
+            # Threshold: bar with a vertical cutoff line
+            p.setPen(QPen(QColor(240,240,240), size*0.06))
+            y = int(size*0.60)
+            p.drawLine(int(size*0.18), y, int(size*0.82), y)
+            # Filled below threshold (left) and empty above (right)
+            p.setBrush(QBrush(QColor('#fb8c00')))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRect(int(size*0.18), int(size*0.45), int(size*0.30), int(size*0.28))
+            # Threshold line
+            th_x = int(size*0.52)
+            p.setPen(QPen(QColor('#ffcc80'), size*0.06))
+            p.drawLine(th_x, int(size*0.36), th_x, int(size*0.78))
+            # Add small 'T' label
+            p.setPen(QPen(QColor(255,255,255)))
+            font = QFont(); font.setBold(True); font.setPixelSize(int(size*0.30))
+            p.setFont(font)
+            from PyQt6.QtCore import QRect as _QRect, Qt as _Qt
+            p.drawText(_QRect(0, 0, size, int(size*0.40)), int(_Qt.AlignmentFlag.AlignHCenter | _Qt.AlignmentFlag.AlignVCenter), 'T')
+        elif algo_key == 'composite':
+            # Composite: overlapping shapes (Venn diagram)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(41, 182, 246, 220)))  # light blue
+            p.drawEllipse(int(size*0.22), int(size*0.28), int(size*0.28), int(size*0.28))
+            p.setBrush(QBrush(QColor(129, 199, 132, 220)))  # green
+            p.drawEllipse(int(size*0.38), int(size*0.28), int(size*0.28), int(size*0.28))
+            # Overlap outline highlight
+            p.setPen(QPen(QColor(240,240,240), size*0.04))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(int(size*0.22), int(size*0.28), int(size*0.28), int(size*0.28))
+            p.drawEllipse(int(size*0.38), int(size*0.28), int(size*0.28), int(size*0.28))
         elif shape_key == 'ellipse':
             # Filled circle for ellipse
             p.setBrush(QBrush(QColor('#42a5f5')))
@@ -934,6 +1173,27 @@ class SettingsPanel(QWidget):
             p.setPen(QPen(QColor(255,255,255), size * 0.06))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(m, m, size - 2*m, size - 2*m)
+        elif algo_key == 'overlay':
+            # Overlay: draw a WF plate with an FL heatmap circle on top
+            from PyQt6.QtCore import QPointF
+            # WF base
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(80, 80, 80)))
+            p.drawRoundedRect(int(size*0.18), int(size*0.30), int(size*0.64), int(size*0.32), int(size*0.08), int(size*0.08))
+            # FL blob (colored)
+            grad_colors = [QColor('#2c7bb6'), QColor('#abd9e9'), QColor('#ffffbf'), QColor('#fdae61'), QColor('#d7191c')]
+            # Draw concentric circles to suggest LUT
+            radii = [int(size*0.16), int(size*0.12), int(size*0.08), int(size*0.05)]
+            cx, cy = int(size*0.50), int(size*0.46)
+            for i, r in enumerate(radii):
+                col = grad_colors[i % len(grad_colors)]
+                col.setAlpha(230)
+                p.setBrush(QBrush(col))
+                p.drawEllipse(cx - r, cy - r, 2*r, 2*r)
+            # Small white border accent
+            p.setPen(QPen(QColor(255,255,255), size*0.03))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(int(size*0.18), int(size*0.30), int(size*0.64), int(size*0.32), int(size*0.08), int(size*0.08))
         elif shape_key == 'text':
             # Badge with 'A' for text annotation
             p.setBrush(QBrush(QColor('#66bb6a')))
@@ -965,6 +1225,8 @@ class SettingsPanel(QWidget):
             return 'Auto ROI (Otsu)'
         if algo_key == 'threshold':
             return 'Auto ROI (Manual Threshold)'
+        if algo_key == 'overlay':
+            return 'Overlay ROI (FL+WF)'
         if algo_key == 'composite':
             return 'Composite ROI'
         if shape_key == 'ellipse':

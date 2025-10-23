@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import List, Tuple, Optional, Literal
 from PyQt6.QtCore import QRect, QPointF
 from PyQt6.QtGui import QColor
@@ -12,6 +12,11 @@ def _next_id() -> int:
     global _id_counter
     _id_counter += 1
     return _id_counter
+
+def _set_id_counter_at_least(n: int) -> None:
+    global _id_counter
+    if n > _id_counter:
+        _id_counter = n
 
 @dataclass
 class ROI:
@@ -30,6 +35,18 @@ class ROI:
     channel: Optional[str] = None        # 'WF' | 'FL' | None
     threshold: Optional[int] = None      # manual threshold value
     otsu_boost: Optional[int] = None     # boost percent for otsu
+    # Overlay-ROI specific parameters (acts on WF+FL overlay, separate from preview/collage)
+    overlay_min: Optional[int] = None       # FL min intensity for LUT mapping
+    overlay_max: Optional[int] = None       # FL max intensity for LUT mapping
+    overlay_lut: Optional[str] = None       # colormap name
+    overlay_alpha: Optional[int] = None     # transparency percent (0-100)
+    overlay_method: Optional[str] = None    # 'threshold' | 'otsu'
+    overlay_thresh: Optional[int] = None    # 0-255 threshold on 8-bit overlay
+    overlay_otsu_boost: Optional[int] = None # boost percent for otsu on overlay
+    # Overlay post/pre-processing options
+    overlay_smooth_method: Optional[str] = None  # 'none'|'gaussian'|'median'
+    overlay_smooth_ksize: Optional[int] = None   # odd kernel size
+    overlay_keep_largest: Optional[bool] = None  # keep only largest connected component
     # Base image size at creation or last edit (for proportional scaling across images)
     base_w: Optional[int] = None
     base_h: Optional[int] = None
@@ -87,8 +104,113 @@ class ROIManager:
                 'channel': r.channel,
                 'threshold': r.threshold,
                 'otsu_boost': r.otsu_boost,
+                # Composite summary
                 'composite_op': r.composite_op,
                 'composite_sources': list(r.composite_sources) if r.composite_sources else None,
+                # Overlay-specific summary (to seed dialogs)
+                'overlay_min': r.overlay_min,
+                'overlay_max': r.overlay_max,
+                'overlay_lut': r.overlay_lut,
+                'overlay_alpha': r.overlay_alpha,
+                'overlay_method': r.overlay_method,
+                'overlay_thresh': r.overlay_thresh,
+                'overlay_otsu_boost': r.overlay_otsu_boost,
+                'overlay_smooth_method': r.overlay_smooth_method,
+                'overlay_smooth_ksize': r.overlay_smooth_ksize,
+                'overlay_keep_largest': r.overlay_keep_largest,
             }
             for r in self.rois
         ]
+
+    # --- Serialization helpers ---
+    def to_jsonable(self) -> list[dict]:
+        """Serialize all ROIs to a JSON-friendly list of dicts, preserving ids and geometry."""
+        data: list[dict] = []
+        for r in self.rois:
+            entry = {
+                'id': r.id,
+                'name': r.name,
+                'shape': r.shape,
+                'visible': bool(r.visible),
+                'color': (r.color.red(), r.color.green(), r.color.blue(), r.color.alpha()),
+                'rect': [int(r.rect.x()), int(r.rect.y()), int(r.rect.width()), int(r.rect.height())] if r.rect is not None else None,
+                'points': [[float(p.x()), float(p.y())] for p in (r.points or [])] if r.points else None,
+                'label': r.label,
+                'algo': r.algo,
+                'channel': r.channel,
+                'threshold': r.threshold,
+                'otsu_boost': r.otsu_boost,
+                'base_w': r.base_w,
+                'base_h': r.base_h,
+                'composite_op': r.composite_op,
+                'composite_sources': list(r.composite_sources) if r.composite_sources else None,
+                # Overlay fields
+                'overlay_min': r.overlay_min,
+                'overlay_max': r.overlay_max,
+                'overlay_lut': r.overlay_lut,
+                'overlay_alpha': r.overlay_alpha,
+                'overlay_method': r.overlay_method,
+                'overlay_thresh': r.overlay_thresh,
+                'overlay_otsu_boost': r.overlay_otsu_boost,
+                'overlay_smooth_method': r.overlay_smooth_method,
+                'overlay_smooth_ksize': r.overlay_smooth_ksize,
+                'overlay_keep_largest': bool(r.overlay_keep_largest) if r.overlay_keep_largest is not None else None,
+            }
+            data.append(entry)
+        return data
+
+    def load_from_jsonable(self, data: list[dict]) -> None:
+        """Replace current ROIs with those from a serialized list. Preserves ids and metadata."""
+        self.rois = []
+        max_id = 0
+        for d in (data or []):
+            try:
+                shape = d.get('shape')
+                name = d.get('name', 'ROI')
+                col = d.get('color', (100, 180, 255, 255))
+                color = QColor(int(col[0]), int(col[1]), int(col[2]), int(col[3]) if len(col) > 3 else 255)
+                r = ROI(shape=shape, name=name, color=color)
+                # id
+                rid = int(d.get('id')) if d.get('id') is not None else None
+                if rid is not None:
+                    r.id = rid
+                    max_id = max(max_id, rid)
+                # visibility
+                r.visible = bool(d.get('visible', True))
+                # geometry
+                rect = d.get('rect')
+                if rect and len(rect) == 4:
+                    r.rect = QRect(int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+                pts = d.get('points')
+                if pts:
+                    r.points = [QPointF(float(x), float(y)) for x, y in pts]
+                # text label
+                r.label = d.get('label')
+                # algo params
+                r.algo = d.get('algo')
+                r.channel = d.get('channel')
+                r.threshold = d.get('threshold')
+                r.otsu_boost = d.get('otsu_boost')
+                # base dims
+                r.base_w = d.get('base_w')
+                r.base_h = d.get('base_h')
+                # composite metadata
+                r.composite_op = d.get('composite_op')
+                srcs = d.get('composite_sources')
+                r.composite_sources = list(srcs) if srcs else None
+                # overlay metadata
+                r.overlay_min = d.get('overlay_min')
+                r.overlay_max = d.get('overlay_max')
+                r.overlay_lut = d.get('overlay_lut')
+                r.overlay_alpha = d.get('overlay_alpha')
+                r.overlay_method = d.get('overlay_method')
+                r.overlay_thresh = d.get('overlay_thresh')
+                r.overlay_otsu_boost = d.get('overlay_otsu_boost')
+                r.overlay_smooth_method = d.get('overlay_smooth_method')
+                r.overlay_smooth_ksize = d.get('overlay_smooth_ksize')
+                r.overlay_keep_largest = d.get('overlay_keep_largest')
+                self.add_roi(r)
+            except Exception:
+                # skip malformed entries
+                continue
+        _set_id_counter_at_least(max_id)

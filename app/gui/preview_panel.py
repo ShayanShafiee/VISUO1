@@ -1,13 +1,16 @@
 # --- CORRECTED FILE: gui/preview_panel.py ---
 
 import os
+import re
+from datetime import datetime
 import cv2
 import numpy as np
 from processing.image_processor import create_gradient_image, compute_animal_outline
+from processing.image_processor import apply_lut, create_overlay
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QPushButton, QHBoxLayout, QApplication,
                              QSizePolicy, QFileDialog, QGroupBox, QFormLayout, QSpinBox,
                              QGraphicsView, QGraphicsScene, QInputDialog)
-from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor
+from PyQt6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QIcon, QPen, QColor, QFont
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QTimer, QPoint, QPointF, QSize
 from typing import Optional
 
@@ -135,6 +138,144 @@ COLOR_MAP = {
 }
 
 
+class TimestampOverlay(QWidget):
+    """A transparent, mouse-pass-through overlay pinned to the viewport that draws
+    a small timestamp text box in the top-left of the visible area (screen space),
+    unaffected by zoom or pan.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._bg = QColor(0, 0, 0, 140)
+        self._fg = QColor(240, 240, 240)
+        self._padding = 6
+        self._corner_radius = 6
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.hide()
+
+    def setText(self, text: str):
+        self._text = text or ""
+        self.update()
+
+    def setAppearance(self, fg: QColor = None, pixel_size: int = None):
+        if fg is not None:
+            self._fg = QColor(fg)
+        if isinstance(pixel_size, int) and pixel_size > 0:
+            f = self.font()
+            f.setPixelSize(pixel_size)
+            self.setFont(f)
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._text:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        # Background spans the widget area (slightly transparent)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._bg)
+        p.drawRoundedRect(rect, self._corner_radius, self._corner_radius)
+        # Text within with padding
+        p.setPen(self._fg)
+        p.drawText(rect.adjusted(self._padding, 0, -self._padding, 0),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._text)
+        p.end()
+
+
+class RegistrationInfoBar(QWidget):
+    """A compact bar showing registration transform info (dx, dy, theta)
+    with a small schematic. Shown only when registration is enabled.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dx = 0.0
+        self._dy = 0.0
+        self._theta = 0.0
+        self.setFixedHeight(36)
+        self.setMinimumWidth(180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Slightly transparent background (match timestamp style)
+        self._bg = QColor(0, 0, 0, 140)
+        self._fg = QColor(220, 220, 220)
+        self.hide()
+        # Overlays should not intercept mouse events when used as overlays
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_info(self, dx: float, dy: float, theta_deg: float):
+        self._dx, self._dy, self._theta = float(dx), float(dy), float(theta_deg)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Background strip
+        p.fillRect(self.rect(), self._bg)
+        h = self.height()
+        margin = 10
+        # Schematic area
+        schem_w = 90
+        center = QPoint(margin + schem_w // 2, h // 2)
+
+        # Draw reference center cross
+        p.setPen(QPen(QColor(180, 180, 180), 2))
+        cross_len = 8
+        p.drawLine(center.x() - cross_len, center.y(), center.x() + cross_len, center.y())
+        p.drawLine(center.x(), center.y() - cross_len, center.x(), center.y() + cross_len)
+
+        # Draw match cross at fixed radius in the direction of (-dx, -dy) (pre-shift location)
+        import math
+        vec_len = math.hypot(self._dx, self._dy)
+        if vec_len > 1e-3:
+            angle = math.atan2(-self._dy, -self._dx)  # from center to match
+            R = 14
+            mx = int(center.x() + R * math.cos(angle))
+            my = int(center.y() + R * math.sin(angle))
+            match_pt = QPoint(mx, my)
+            # Arrow from match to center (indicates translation direction)
+            p.setPen(QPen(QColor(255, 215, 0), 2))  # gold
+            p.drawLine(match_pt, center)
+            # Simple arrowhead
+            ah_len = 6
+            ah_angle = math.radians(25)
+            back_angle = math.atan2(center.y() - my, center.x() - mx)
+            left = QPoint(int(center.x() - ah_len * math.cos(back_angle - ah_angle)),
+                          int(center.y() - ah_len * math.sin(back_angle - ah_angle)))
+            right = QPoint(int(center.x() - ah_len * math.cos(back_angle + ah_angle)),
+                           int(center.y() - ah_len * math.sin(back_angle + ah_angle)))
+            p.drawLine(center, left)
+            p.drawLine(center, right)
+            # Match cross
+            p.setPen(QPen(QColor(0, 255, 255), 2))  # cyan
+            p.drawLine(mx - cross_len, my, mx + cross_len, my)
+            p.drawLine(mx, my - cross_len, mx, my + cross_len)
+
+        # Text area to the right (fixed columns so values don't shift positions)
+        p.setPen(QPen(self._fg))
+        text_x = margin + schem_w + 10
+        text_rect = QRect(text_x, 0, self.width() - (text_x + 10), h)
+        col_w = max(1, text_rect.width() // 3)
+        # Use delta symbol and fixed-sign formatting; optional monospace hint for stability
+        try:
+            f = QFont(self.font())
+            f.setStyleHint(QFont.StyleHint.Monospace)
+            f.setFamily("Monospace")
+            p.setFont(f)
+        except Exception:
+            pass
+        cols = [
+            f"Δx: {self._dx:+.1f}",
+            f"Δy: {self._dy:+.1f}",
+            f"θ: {self._theta:+.1f}°",
+        ]
+        for i, t in enumerate(cols):
+            col_rect = QRect(text_rect.x() + i * col_w, text_rect.y(), col_w, text_rect.height())
+            p.drawText(col_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, t)
+        p.end()
+
+
 class LiveColorBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -251,7 +392,7 @@ class PreviewPanel(QWidget):
         # Add the horizontal layout to the main panel's vertical layout and let it take extra space
         top_level_layout.addLayout(image_and_bar_layout, 1)
 
-        # 2a. ZOOM CONTROLS
+    # 2a. ZOOM CONTROLS
         zoom_layout = QHBoxLayout()
         self.zoom_out_btn = QPushButton("")
         self.zoom_home_btn = QPushButton("")
@@ -277,6 +418,11 @@ class PreviewPanel(QWidget):
         zoom_layout.addStretch(1)
         top_level_layout.addLayout(zoom_layout)
 
+        # 2b. REGISTRATION INFO (legacy layout bar hidden; overlay version added later)
+        self.registration_bar = RegistrationInfoBar(self)
+        self.registration_bar.hide()
+        top_level_layout.addWidget(self.registration_bar)
+
         # Multi-ROI layer (annotations)
         self.roi_manager = ROIManager()
         self.multi_roi_overlay = MultiROIOverlay(self.image_view.viewport(), self.image_view, self.roi_manager)
@@ -293,7 +439,7 @@ class PreviewPanel(QWidget):
         self.outline_overlay = OutlineOverlay(self.image_view.viewport(), self.image_view)
         self.outline_overlay.setGeometry(self.image_view.viewport().rect())
 
-    # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
+        # The interactive ROI widget is a transparent overlay on the graphics view's viewport.
         self.roi_widget = InteractiveROI(self.image_view.viewport())
         self.roi_widget.roiChanged.connect(self._on_roi_drawn)  # Emits the raw widget rect
         # Hide crop overlay until an image is loaded
@@ -316,21 +462,7 @@ class PreviewPanel(QWidget):
         except Exception:
             self.multi_roi_overlay.raise_()
 
-        # 3. FILE INFO GROUP
-        info_group = QGroupBox("Current Preview File")
-        info_layout = QFormLayout(info_group)
-        info_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        info_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-
-        self.wf_path_label = QLabel("N/A")
-        self.fl_path_label = QLabel("N/A")
-        for label in [self.wf_path_label, self.fl_path_label]:
-            label.setWordWrap(True)
-        info_layout.addRow("WF File:", self.wf_path_label)
-        info_layout.addRow("FL File:", self.fl_path_label)
-        top_level_layout.addWidget(info_group)
-
-        # 4. NAVIGATION BUTTONS
+        # 3. NAVIGATION BUTTONS (moved above file info)
         button_layout = QHBoxLayout()
         self.prev_button = QPushButton("◀ Previous")
         self.random_button = QPushButton("↻ Random")
@@ -348,6 +480,35 @@ class PreviewPanel(QWidget):
         button_layout.addStretch(1)  # Pushes the "Select" button to the far right
         button_layout.addWidget(self.select_button)
         top_level_layout.addLayout(button_layout)
+
+        # 4. FILE INFO GROUP (moved below navigation)
+        info_group = QGroupBox("Current Preview File")
+        info_layout = QFormLayout(info_group)
+        info_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        info_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.wf_path_label = QLabel("N/A")
+        self.fl_path_label = QLabel("N/A")
+        for label in [self.wf_path_label, self.fl_path_label]:
+            label.setWordWrap(True)
+        info_layout.addRow("WF File:", self.wf_path_label)
+        info_layout.addRow("FL File:", self.fl_path_label)
+        top_level_layout.addWidget(info_group)
+
+        # 5. TIMESTAMP + REGISTRATION OVERLAYS (screen-space, non-zoomable)
+        self.timestamp_overlay = TimestampOverlay(self.image_view.viewport())
+        self.registration_overlay = RegistrationInfoBar(self.image_view.viewport())
+        # Ensure mouse pass-through (already set in class) and initial hidden state
+        self.timestamp_overlay.hide()
+        self.registration_overlay.hide()
+        # Initial geometry sync
+        self._layout_top_overlays()
+        # Keep overlays on top
+        try:
+            self.timestamp_overlay.raise_()
+            self.registration_overlay.raise_()
+        except Exception:
+            pass
 
     def _make_zoom_icon(self, plus: bool = True) -> QIcon:
         """Create a magnifying-glass icon with + or - drawn programmatically (no external assets)."""
@@ -570,6 +731,8 @@ class PreviewPanel(QWidget):
             self.roi_widget.setGeometry(vp)
             if hasattr(self, 'outline_overlay'):
                 self.outline_overlay.setGeometry(vp)
+            # Position screen-space overlays (timestamp + registration) at the top
+            self._layout_top_overlays()
             # Constrain crop shading to image bounds within the viewport
             self._update_crop_image_rect()
             # Reapply canonical image-space ROI to new mapping
@@ -581,6 +744,8 @@ class PreviewPanel(QWidget):
                 self.outline_overlay.remap_to_viewport()
         except Exception:
             pass
+        # Update timestamp overlay visibility based on settings and file info
+        self._update_timestamp_overlay()
 
     # --- Zoom API ---
     def zoom_in(self):
@@ -618,10 +783,42 @@ class PreviewPanel(QWidget):
                 self.outline_overlay.remap_to_viewport()
             except Exception:
                 pass
+        # Update top overlays layout on pan/zoom
+        self._layout_top_overlays()
         # Update crop shading area to align with current image position/zoom
         self._update_crop_image_rect()
         if self._image_roi is not None:
             self.update_roi_display(self._image_roi)
+        self._update_timestamp_overlay()
+
+    def _layout_top_overlays(self):
+        """Layout the timestamp and registration info overlays at the top of the viewport.
+        Timestamp occupies 1/5 width; registration bar uses remaining 4/5 with a small gap.
+        """
+        try:
+            if not hasattr(self, 'image_view') or not hasattr(self, 'timestamp_overlay'):
+                return
+            vp = self.image_view.viewport().rect()
+            vw = max(0, vp.width())
+            if vw <= 0:
+                return
+            gap = 6  # few pixels gap
+            bar_h = 36  # fixed bar height matching RegistrationInfoBar
+            ts_w = int(round(vw * 0.20))
+            reg_w = max(0, vw - ts_w - gap)
+            # Place at the very top-left of the viewport
+            self.timestamp_overlay.setGeometry(QRect(vp.x(), vp.y(), ts_w, bar_h))
+            if hasattr(self, 'registration_overlay'):
+                self.registration_overlay.setGeometry(QRect(vp.x() + ts_w + gap, vp.y(), reg_w, bar_h))
+            # Keep them on top
+            try:
+                self.timestamp_overlay.raise_()
+                if hasattr(self, 'registration_overlay'):
+                    self.registration_overlay.raise_()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _update_crop_image_rect(self):
         """Compute the image's rectangle in viewport coordinates and pass it to the crop overlay.
@@ -660,8 +857,8 @@ class PreviewPanel(QWidget):
     def _apply_outline_settings(self):
         if not hasattr(self, 'outline_overlay'):
             return
-        # Read settings with defaults
-        show = bool(self.current_settings.get("show_animal_outline", False)) if self.current_settings else False
+        # Animal Outline option removed per request: force hidden regardless of settings
+        show = False
         color_val = self.current_settings.get("animal_outline_color", (0, 255, 0, 255)) if self.current_settings else (0, 255, 0, 255)
         if isinstance(color_val, (tuple, list)) and len(color_val) >= 3:
             color = QColor(int(color_val[0]), int(color_val[1]), int(color_val[2]))
@@ -676,6 +873,38 @@ class PreviewPanel(QWidget):
         self.outline_overlay.set_params(visible=show, color=color, threshold=thresh, source=source)
         # Recompute/mapping
         self.outline_overlay.update_outline()
+
+    def _update_timestamp_overlay(self):
+        """Show/hide and update the timestamp overlay based on settings and available text."""
+        try:
+            has_img = self.image_view.has_image()
+        except Exception:
+            has_img = False
+        # Follow the same control as collage watermark
+        show_flag = bool(self.current_settings.get("watermark_enabled", True)) if self.current_settings else True
+        text = getattr(self, '_timestamp_text', '') or ''
+        if has_img and show_flag and text:
+            # Apply color and size from settings
+            try:
+                color_name = self.current_settings.get("watermark_color", "White")
+                bgr = COLOR_MAP.get(color_name, (255, 255, 255))
+                # Convert BGR to RGB for QColor
+                fg = QColor(int(bgr[2]), int(bgr[1]), int(bgr[0]))
+                size_px = int(self.current_settings.get("watermark_size", 20))
+                self.timestamp_overlay.setAppearance(fg, size_px)
+            except Exception:
+                pass
+            try:
+                self.timestamp_overlay.setText(text)
+                self.timestamp_overlay.show()
+                self.timestamp_overlay.raise_()
+            except Exception:
+                pass
+        else:
+            try:
+                self.timestamp_overlay.hide()
+            except Exception:
+                pass
 
     # --- Multi-ROI Management API ---
     def add_rectangle_roi(self):
@@ -734,6 +963,66 @@ class PreviewPanel(QWidget):
             return img
         except Exception:
             return None
+
+    def _compute_overlay_contour(self, roi) -> Optional[object]:
+        """Build an overlay using ROI-specific settings and compute contour via threshold/Otsu.
+        Thresholding operates on the 8-bit grayscale of the overlay (0-255 domain).
+        """
+        try:
+            import cv2, numpy as np
+            from tifffile import imread
+        except Exception:
+            return None
+        if not self._wf_path or not self._fl_path:
+            return None
+        try:
+            wf = imread(self._wf_path)
+            fl = imread(self._fl_path)
+        except Exception:
+            return None
+        # Map FL -> RGB via LUT using overlay_min/max and overlay_lut
+        min_v = int(getattr(roi, 'overlay_min', 0) or 0)
+        max_v = int(getattr(roi, 'overlay_max', 65535) or 65535)
+        lut_name = getattr(roi, 'overlay_lut', 'nipy_spectral') or 'nipy_spectral'
+        alpha = int(getattr(roi, 'overlay_alpha', 40) or 40)
+        try:
+            fl_rgb = apply_lut(fl, min_v, max_v, lut_name)
+            ov = create_overlay(wf, fl_rgb, alpha)
+        except Exception:
+            return None
+        # Convert overlay (RGB) to grayscale explicitly
+        try:
+            ov_gray = cv2.cvtColor(ov, cv2.COLOR_RGB2GRAY)
+        except Exception:
+            # Fallback: simple luminance approximation
+            try:
+                ov_gray = (0.299*ov[...,0] + 0.587*ov[...,1] + 0.114*ov[...,2]).astype('uint8')
+            except Exception:
+                return None
+        # Optional smoothing prior to thresholding
+        try:
+            sm_method = (getattr(roi, 'overlay_smooth_method', 'none') or 'none').lower()
+            k = int(getattr(roi, 'overlay_smooth_ksize', 3) or 3)
+            if k < 1:
+                k = 1
+            if k % 2 == 0:
+                k += 1
+            if sm_method == 'gaussian' and k >= 3:
+                ov_gray = cv2.GaussianBlur(ov_gray, (k, k), 0)
+            elif sm_method == 'median' and k >= 3:
+                ov_gray = cv2.medianBlur(ov_gray, k)
+        except Exception:
+            pass
+        method = (getattr(roi, 'overlay_method', 'otsu') or 'otsu').lower()
+        if method == 'threshold':
+            t = int(getattr(roi, 'overlay_thresh', 128) or 128)
+            cnt = compute_animal_outline(ov_gray, method='manual', threshold=t)
+        else:
+            boost = int(getattr(roi, 'overlay_otsu_boost', 10) or 10)
+            cnt = compute_animal_outline(ov_gray, method='otsu', otsu_boost_percent=boost)
+        # For now, compute_animal_outline already returns the largest component.
+        # If in the future we support keeping multiple blobs, we'd handle it here.
+        return cnt
 
     def _compute_auto_contour(self, algo: str, channel: str, threshold: Optional[int], otsu_boost: Optional[int]):
         """Compute a contour using the given algorithm parameters from the selected channel."""
@@ -912,6 +1201,97 @@ class PreviewPanel(QWidget):
             self.activeRoiChanged.emit(roi.id)
         except Exception:
             pass
+
+    def add_overlay_roi(self):
+        """Add an Overlay ROI that thresholds on a WF+FL overlay with its own settings."""
+        if not hasattr(self, 'image_view') or not self.image_view.has_image():
+            return
+        palette = [QColor('#ff5252'), QColor('#ffb74d'), QColor('#ffd54f'), QColor('#81c784'), QColor('#64b5f6'), QColor('#9575cd')]
+        idx = len(self.roi_manager.rois) % len(palette)
+        name = f"Overlay {len(self.roi_manager.rois)+1}"
+        # Seed from current settings for sensible defaults, but store separately
+        try:
+            defaults = getattr(self, '_last_overlay_defaults', None) or {}
+        except Exception:
+            defaults = {}
+        # Compute initial contour
+        dummy = type('X', (), {})()
+        dummy.overlay_min = defaults.get('min', 0)
+        dummy.overlay_max = defaults.get('max', 65535)
+        dummy.overlay_lut = defaults.get('lut', 'nipy_spectral')
+        dummy.overlay_alpha = defaults.get('alpha', 40)
+        dummy.overlay_method = defaults.get('method', 'otsu')
+        dummy.overlay_thresh = defaults.get('thresh', 128)
+        dummy.overlay_otsu_boost = defaults.get('boost', 10)
+        dummy.overlay_smooth_method = defaults.get('smooth_method', 'none')
+        dummy.overlay_smooth_ksize = defaults.get('smooth_ksize', 3)
+        dummy.overlay_keep_largest = defaults.get('keep_largest', True)
+        contour = self._compute_overlay_contour(dummy)
+        pts = self._contour_to_points(contour)
+        scene_rect = self.image_view.scene().sceneRect()
+        roi = ROI(
+            shape='contour', name=name, color=palette[idx], points=pts, algo='overlay',
+            base_w=int(scene_rect.width()), base_h=int(scene_rect.height()),
+        )
+        roi.overlay_min = int(dummy.overlay_min)
+        roi.overlay_max = int(dummy.overlay_max)
+        roi.overlay_lut = str(dummy.overlay_lut)
+        roi.overlay_alpha = int(dummy.overlay_alpha)
+        roi.overlay_method = str(dummy.overlay_method)
+        roi.overlay_thresh = int(dummy.overlay_thresh)
+        roi.overlay_otsu_boost = int(dummy.overlay_otsu_boost)
+        roi.overlay_smooth_method = str(dummy.overlay_smooth_method)
+        roi.overlay_smooth_ksize = int(dummy.overlay_smooth_ksize)
+        roi.overlay_keep_largest = bool(dummy.overlay_keep_largest)
+        self.roi_manager.add_roi(roi)
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
+        self.set_active_roi(roi.id)
+        try:
+            self.activeRoiChanged.emit(roi.id)
+        except Exception:
+            pass
+
+    def update_overlay_roi_properties(self, roi_id: int, props: dict):
+        """Update overlay ROI parameters and recompute its contour."""
+        roi = self.roi_manager.get_roi(roi_id)
+        if not roi or (getattr(roi, 'algo', '') or '').lower() != 'overlay':
+            return
+        # Update parameters
+        roi.overlay_min = int(props.get('overlay_min', roi.overlay_min or 0))
+        roi.overlay_max = int(props.get('overlay_max', roi.overlay_max or 65535))
+        roi.overlay_lut = str(props.get('overlay_lut', roi.overlay_lut or 'nipy_spectral'))
+        roi.overlay_alpha = int(props.get('overlay_alpha', roi.overlay_alpha or 40))
+        roi.overlay_method = str(props.get('overlay_method', roi.overlay_method or 'otsu'))
+        roi.overlay_thresh = int(props.get('overlay_thresh', roi.overlay_thresh or 128))
+        roi.overlay_otsu_boost = int(props.get('overlay_otsu_boost', roi.overlay_otsu_boost or 10))
+        roi.overlay_smooth_method = str(props.get('overlay_smooth_method', roi.overlay_smooth_method or 'none'))
+        roi.overlay_smooth_ksize = int(props.get('overlay_smooth_ksize', roi.overlay_smooth_ksize or 3))
+        roi.overlay_keep_largest = bool(props.get('overlay_keep_largest', True if roi.overlay_keep_largest is None else roi.overlay_keep_largest))
+        # Recompute contour
+        contour = self._compute_overlay_contour(roi)
+        roi.points = self._contour_to_points(contour)
+        # Update base dims
+        try:
+            scene_rect = self.image_view.scene().sceneRect()
+            roi.base_w = int(scene_rect.width())
+            roi.base_h = int(scene_rect.height())
+        except Exception:
+            pass
+        # Remember last-used defaults for next creation
+        try:
+            self._last_overlay_defaults = {
+                'min': roi.overlay_min, 'max': roi.overlay_max, 'lut': roi.overlay_lut,
+                'alpha': roi.overlay_alpha, 'method': roi.overlay_method,
+                'thresh': roi.overlay_thresh, 'boost': roi.overlay_otsu_boost,
+                'smooth_method': roi.overlay_smooth_method, 'smooth_ksize': roi.overlay_smooth_ksize,
+                'keep_largest': roi.overlay_keep_largest,
+            }
+        except Exception:
+            pass
+        # Refresh
+        self.multi_roi_overlay.update()
+        self.roiListUpdated.emit(self.roi_manager.list_summary())
 
     def add_composite_roi(self, cfg: object):
         """Create a composite ROI from provided config: {'op': str, 'sources': List[int]}"""
@@ -1199,6 +1579,12 @@ class PreviewPanel(QWidget):
                 roi.base_w = nw
                 roi.base_h = nh
                 changed = True
+            elif algo == 'overlay':
+                contour = self._compute_overlay_contour(roi)
+                roi.points = self._contour_to_points(contour)
+                roi.base_w = nw
+                roi.base_h = nh
+                changed = True
             elif roi.shape in ('rect', 'ellipse') and roi.rect is not None:
                 bw = getattr(roi, 'base_w', None) or nw
                 bh = getattr(roi, 'base_h', None) or nh
@@ -1236,6 +1622,36 @@ class PreviewPanel(QWidget):
         except Exception:
             pass
 
+    # --- Overlay preview for settings dialog ---
+    def compute_overlay_preview(self, params: dict) -> Optional[QImage]:
+        """Return a small QImage preview of overlay built with given params.
+        Params: overlay_min, overlay_max, overlay_lut, overlay_alpha
+        """
+        try:
+            import cv2
+            from tifffile import imread
+        except Exception:
+            return None
+        if not self._wf_path or not self._fl_path:
+            return None
+        try:
+            wf = imread(self._wf_path)
+            fl = imread(self._fl_path)
+            fl_rgb = apply_lut(fl, int(params.get('overlay_min', 0)), int(params.get('overlay_max', 65535)), str(params.get('overlay_lut', 'nipy_spectral')))
+            ov = create_overlay(wf, fl_rgb, int(params.get('overlay_alpha', 40)))
+            # Resize to a thumbnail
+            h, w = ov.shape[:2]
+            scale = 240 / max(1, max(h, w))
+            thumb = cv2.resize(ov, (max(1, int(w*scale)), max(1, int(h*scale))), interpolation=cv2.INTER_AREA)
+            # Convert to QImage (RGB888)
+            if not thumb.flags['C_CONTIGUOUS']:
+                thumb = np.ascontiguousarray(thumb)
+            th, tw = thumb.shape[:2]
+            qim = QImage(thumb.data, tw, th, 3*tw, QImage.Format.Format_RGB888)
+            return qim.copy()
+        except Exception:
+            return None
+
     def _recompute_composite_rois(self, affected_ids: Optional[list] = None):
         """Recompute all composite ROIs, or only those affected by given ROI ids."""
         any_change = False
@@ -1272,6 +1688,33 @@ class PreviewPanel(QWidget):
         if self._image_roi is not None:
             self.update_roi_display(self._image_roi)
 
+    # --- ROI persistence helpers ---
+    def export_rois_data(self) -> list[dict]:
+        """Return a JSON-friendly list representing all ROIs and their properties."""
+        try:
+            return self.roi_manager.to_jsonable()
+        except Exception:
+            return []
+
+    def import_rois_data(self, data: list[dict]):
+        """Replace current ROIs with provided serialized data and refresh overlays/list."""
+        try:
+            self.roi_manager.load_from_jsonable(data or [])
+            # When image is present, recompute any algorithmic ROI contours for this image size
+            try:
+                self._reapply_rois_for_current_image()
+            except Exception:
+                pass
+            # Refresh overlay and emit list update
+            if hasattr(self, 'multi_roi_overlay'):
+                self.multi_roi_overlay.update()
+            try:
+                self.roiListUpdated.emit(self.roi_manager.list_summary())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def set_file_info(self, wf_path: str, fl_path: str):
         self.wf_path_label.setText(os.path.basename(wf_path))
         self.wf_path_label.setToolTip(wf_path)
@@ -1286,8 +1729,48 @@ class PreviewPanel(QWidget):
                 self.outline_overlay.update_outline()
         except Exception:
             pass
+        # Derive timestamp from filenames or file metadata
+        self._timestamp_text = self._derive_timestamp_text(self._wf_path, self._fl_path)
+        self._update_timestamp_overlay()
 
     def _select_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Select Image for Preview", "", "Tiff Files (*.tif *.tiff)")
         if filepath:
             self.requestSpecificImage.emit(filepath)
+
+    # --- Registration Info API ---
+    def set_registration_info(self, dx: float, dy: float, theta_deg: float, enabled: bool):
+        """Update and show/hide the registration info bar. Call with enabled=False to hide."""
+        if not hasattr(self, 'registration_bar') and not hasattr(self, 'registration_overlay'):
+            return
+        # Always hide the legacy layout bar
+        try:
+            self.registration_bar.hide()
+        except Exception:
+            pass
+        if enabled and hasattr(self, 'registration_overlay'):
+            self.registration_overlay.set_info(dx, dy, theta_deg)
+            self.registration_overlay.show()
+            try:
+                self.registration_overlay.raise_()
+            except Exception:
+                pass
+        elif hasattr(self, 'registration_overlay'):
+            self.registration_overlay.hide()
+
+    # --- Helpers ---
+    def _derive_timestamp_text(self, wf_path: Optional[str], fl_path: Optional[str]) -> str:
+        """Use the same time point extracted for collages: parse filename and render 'X min'."""
+        try:
+            from processing.file_handler import parse_filename
+        except Exception:
+            parse_filename = None
+        candidates = [p for p in [wf_path, fl_path] if p]
+        for pth in candidates:
+            try:
+                parsed = parse_filename(pth) if parse_filename else None
+                if parsed and 'time' in parsed:
+                    return f"{int(parsed['time'])} min"
+            except Exception:
+                continue
+        return ""

@@ -413,6 +413,11 @@ class MainWindow(QMainWindow):
                 self.settings_panel.addCompositeRoiRequested.connect(self.preview_panel.add_composite_roi)
             if hasattr(self.preview_panel, 'update_composite_roi_properties'):
                 self.settings_panel.changeCompositePropertiesRequested.connect(self.preview_panel.update_composite_roi_properties)
+            # Overlay ROI wiring
+            if hasattr(self.preview_panel, 'add_overlay_roi'):
+                self.settings_panel.addOverlayRoiRequested.connect(self.preview_panel.add_overlay_roi)
+            if hasattr(self.preview_panel, 'update_overlay_roi_properties'):
+                self.settings_panel.changeOverlayRoiPropertiesRequested.connect(self.preview_panel.update_overlay_roi_properties)
             self.settings_panel.changeRoiPropertiesRequested.connect(self.preview_panel.update_auto_roi_properties)
         except Exception:
             pass
@@ -425,6 +430,13 @@ class MainWindow(QMainWindow):
         # Keep list selection in sync when a new ROI becomes active (e.g., just added)
         try:
             self.preview_panel.activeRoiChanged.connect(self._select_roi_in_settings)
+        except Exception:
+            pass
+
+        # Provide overlay preview generator to SettingsPanel (for overlay ROI dialog)
+        try:
+            if hasattr(self.settings_panel, 'set_overlay_preview_provider') and hasattr(self.preview_panel, 'compute_overlay_preview'):
+                self.settings_panel.set_overlay_preview_provider(self.preview_panel.compute_overlay_preview)
         except Exception:
             pass
 
@@ -465,6 +477,8 @@ class MainWindow(QMainWindow):
             "settings_panel": self.settings_panel.get_settings(),
             "feature_panel": self.feature_panel.get_settings(),
             "analysis_panel": self.analysis_panel.get_settings(),
+            # Persist ROIs (annotations) and their configurations
+            "rois": self.preview_panel.export_rois_data() if hasattr(self, 'preview_panel') else [],
         }
 
         try:
@@ -494,7 +508,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Error", f"Could not read or parse settings file: {e}")
             return
 
-        # Distribute the loaded settings to all parts of the application
+    # Distribute the loaded settings to all parts of the application
         # Use .get() to avoid errors if a key is missing in the JSON file
         
         self.settings_panel.set_settings(master_settings.get("settings_panel", {}))
@@ -507,7 +521,7 @@ class MainWindow(QMainWindow):
         self.feature_panel.set_settings(master_settings.get("feature_panel", {}))
         self.analysis_panel.set_settings(master_settings.get("analysis_panel", {}))
 
-        # 2. Handle the main window settings LAST.
+    # 2. Handle the main window settings LAST.
         main_settings = master_settings.get("main_window", {})
         
         # Load output directory (this is simple, no extra logic needed)
@@ -519,7 +533,7 @@ class MainWindow(QMainWindow):
             self.output_directory = None
             self.out_dir_label.setText("Not selected.")
 
-        # Load main data directory. This is complex and MUST trigger a full rescan.
+    # Load main data directory. This is complex and MUST trigger a full rescan.
         main_dir = main_settings.get("main_directory")
         if main_dir and os.path.isdir(main_dir):
             # Use the robust helper function we already built.
@@ -534,6 +548,19 @@ class MainWindow(QMainWindow):
             self.grouped_files = {}
             # You might want to clear the preview image here as well.
         
+        # 3. Restore ROIs after directory scan has loaded an initial preview image
+        try:
+            rois_data = master_settings.get("rois", [])
+            if hasattr(self, 'preview_panel') and rois_data:
+                self.preview_panel.import_rois_data(rois_data)
+                # Ensure settings panel ROI list is synced
+                try:
+                    self.settings_panel.update_roi_list(self.preview_panel.roi_manager.list_summary())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         self.statusBar().showMessage(f"Settings loaded from {os.path.basename(filepath)}", 3000)
 
     def select_directory(self):
@@ -718,6 +745,11 @@ class MainWindow(QMainWindow):
         try:
             self.template_image = imread(path)
             self.statusBar().showMessage("Reference template loaded successfully.")
+            # Immediately refresh preview so registration info shows up
+            try:
+                self.update_live_preview()
+            except Exception:
+                pass
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load template image: {e}")
             self.template_image = None
@@ -741,6 +773,58 @@ class MainWindow(QMainWindow):
             
             fl_rgb = apply_lut(fl_image, settings["min_intensity"], settings["max_intensity"], settings["lut"])
             overlay_image = create_overlay(wf_image, fl_rgb, settings["transparency"]) 
+
+            # Update registration info overlay (dx, dy, theta)
+            try:
+                use_reg = bool(settings.get("use_registration", False))
+                tmpl = getattr(self, 'template_image', None)
+                if use_reg and tmpl is not None:
+                    import cv2
+                    import numpy as np
+                    # Replicate registration translation computation without warping
+                    wf_gray = cv2.normalize(wf_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    tmpl_gray = cv2.normalize(tmpl, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    result = cv2.matchTemplate(wf_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+                    _minVal, _maxVal, _minLoc, maxLoc = cv2.minMaxLoc(result)
+                    h_img, w_img = wf_gray.shape[:2]
+                    h_tmpl, w_tmpl = tmpl_gray.shape[:2]
+                    match_cx = maxLoc[0] + w_tmpl / 2.0
+                    match_cy = maxLoc[1] + h_tmpl / 2.0
+                    frame_cx = w_img / 2.0
+                    frame_cy = h_img / 2.0
+                    dx = frame_cx - match_cx
+                    dy = frame_cy - match_cy
+                    # Estimate rotation angle using feature matching + affine model (robust to large rotations)
+                    theta_deg = 0.0
+                    try:
+                        orb = cv2.ORB_create(nfeatures=800)
+                        kf1, des1 = orb.detectAndCompute(wf_gray, None)
+                        kf2, des2 = orb.detectAndCompute(tmpl_gray, None)
+                        if des1 is not None and des2 is not None and len(kf1) >= 8 and len(kf2) >= 8:
+                            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                            matches = bf.knnMatch(des2, des1, k=2)  # template -> frame direction
+                            good = []
+                            for m, n in matches:
+                                if m.distance < 0.75 * n.distance:
+                                    good.append(m)
+                            if len(good) >= 8:
+                                src_pts = np.float32([kf2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)  # template
+                                dst_pts = np.float32([kf1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)  # frame
+                                M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                                if M is not None:
+                                    angle_rad = np.arctan2(M[1, 0], M[0, 0])
+                                    theta_deg = float(np.degrees(angle_rad))
+                    except Exception:
+                        theta_deg = 0.0
+                    self.preview_panel.set_registration_info(dx, dy, theta_deg, enabled=True)
+                else:
+                    self.preview_panel.set_registration_info(0.0, 0.0, 0.0, enabled=False)
+            except Exception:
+                # Hide on error to avoid stale values
+                try:
+                    self.preview_panel.set_registration_info(0.0, 0.0, 0.0, enabled=False)
+                except Exception:
+                    pass
 
             # Draw animal outline directly on the preview image if enabled (robust to overlay widget issues)
             try:
