@@ -154,6 +154,10 @@ class MainWindow(QMainWindow):
         self._suppress_dir_edit_handler = False
         self._suppress_out_dir_edit_handler = False
 
+        # --- New: Feature extraction signature tracking ---
+        self._last_feature_signature = None  # Tuple describing last processed feature config
+        self._current_run_feature_signature = None
+
         self._init_ui()
         self._connect_signals()
         # Simple cache to avoid re-reading images from disk on every tiny UI change
@@ -434,20 +438,9 @@ class MainWindow(QMainWindow):
             self.control_resume_btn.setVisible(False)
         if hasattr(self, 'control_stop_btn'):
             self.control_stop_btn.setVisible(False)
-
-    def _enter_paused_controls(self):
-        if hasattr(self, 'control_start_btn'):
-            self.control_start_btn.setVisible(False)
-        if hasattr(self, 'control_pause_btn'):
-            self.control_pause_btn.setVisible(False)
-        if hasattr(self, 'control_abort_btn'):
-            self.control_abort_btn.setVisible(False)
-        if hasattr(self, 'control_resume_btn'):
-            self.control_resume_btn.setVisible(True)
-        if hasattr(self, 'control_stop_btn'):
-            self.control_stop_btn.setVisible(True)
-
+    
     def _on_verbose_toggled(self, checked: bool):
+        """Toggle verbose logging in SettingsPanel when menu item is toggled."""
         try:
             if hasattr(self, 'settings_panel') and hasattr(self.settings_panel, 'set_verbose_logging'):
                 self.settings_panel.set_verbose_logging(bool(checked))
@@ -456,37 +449,64 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """Connects all signals from child widgets to the main window's slots."""
-
         # --- Directory Panel Connections ---
-        self.dir_button.clicked.connect(self.select_directory)
-        self.out_dir_button.clicked.connect(self.select_output_directory)
-
-        self.dir_label.editingFinished.connect(self._on_main_dir_edited)
-        self.out_dir_label.editingFinished.connect(self._on_out_dir_edited)
-
-        # --- Settings Panel Connections ---
-        self.settings_panel.settingsChanged.connect(self.update_live_preview)
-        self.settings_panel.templatePathChanged.connect(self.load_template_image)
-        self.settings_panel.startProcessing.connect(self.run_processing)
-        # New processing control signals
         try:
-            self.settings_panel.pauseRequested.connect(self.pause_processing)
-            self.settings_panel.resumeRequested.connect(self.resume_processing)
-            self.settings_panel.abortRequested.connect(self.request_abort_processing)
-            self.settings_panel.stopRequested.connect(self.stop_processing)
+            self.dir_button.clicked.connect(self.select_directory)
         except Exception:
             pass
-        
+        try:
+            self.out_dir_button.clicked.connect(self.select_output_directory)
+        except Exception:
+            pass
+
+        try:
+            self.dir_label.editingFinished.connect(self._on_main_dir_edited)
+        except Exception:
+            pass
+        try:
+            self.out_dir_label.editingFinished.connect(self._on_out_dir_edited)
+        except Exception:
+            pass
+
+        # --- Settings Panel Connections ---
+        try:
+            self.settings_panel.settingsChanged.connect(self.update_live_preview)
+            self.settings_panel.templatePathChanged.connect(self.load_template_image)
+            self.settings_panel.startProcessing.connect(self.run_processing)
+            # Optional processing control signals
+            if hasattr(self.settings_panel, 'pauseRequested'):
+                self.settings_panel.pauseRequested.connect(self.pause_processing)
+            if hasattr(self.settings_panel, 'resumeRequested'):
+                self.settings_panel.resumeRequested.connect(self.resume_processing)
+            if hasattr(self.settings_panel, 'abortRequested'):
+                self.settings_panel.abortRequested.connect(self.request_abort_processing)
+            if hasattr(self.settings_panel, 'stopRequested'):
+                self.settings_panel.stopRequested.connect(self.stop_processing)
+        except Exception:
+            pass
+
         # --- Preview Panel Navigation Connections ---
-        # Only honor random loads when explicitly user-initiated; pass force=True via lambda
-        self.preview_panel.requestNewRandomImage.connect(lambda: self.load_random_preview_image(force=True))
-        self.preview_panel.requestSpecificImage.connect(self.load_specific_preview_image)
-        self.preview_panel.requestPreviousImage.connect(self.load_previous_preview_image)
-        self.preview_panel.requestNextImage.connect(self.load_next_preview_image)
+        try:
+            # Only honor random loads when explicitly user-initiated; pass force=True via lambda
+            self.preview_panel.requestNewRandomImage.connect(lambda: self.load_random_preview_image(force=True))
+            self.preview_panel.requestSpecificImage.connect(self.load_specific_preview_image)
+            self.preview_panel.requestPreviousImage.connect(self.load_previous_preview_image)
+            self.preview_panel.requestNextImage.connect(self.load_next_preview_image)
+        except Exception:
+            pass
 
         # --- Two-Way ROI Connections between Settings and Preview Panels ---
-        self.preview_panel.roiChangedFromDrawing.connect(self.settings_panel.update_spinners_from_roi)
-        self.settings_panel.roiChangedFromSpinners.connect(self.preview_panel.update_roi_display)
+        try:
+            # When user draws/moves ROI on preview, update SettingsPanel spinners and re-extract visibility
+            self.preview_panel.roiChangedFromDrawing.connect(self.settings_panel.update_spinners_from_roi)
+            self.preview_panel.roiChangedFromDrawing.connect(lambda *_: self._update_reextract_visibility())
+        except Exception:
+            pass
+        try:
+            # When ROI spinboxes change in SettingsPanel (including on settings load), update preview ROI overlay
+            self.settings_panel.roiChangedFromSpinners.connect(self.preview_panel.update_roi_display)
+        except Exception:
+            pass
 
         # --- Multi-ROI wiring (Annotations) ---
         self.settings_panel.addRectangleRoiRequested.connect(self.preview_panel.add_rectangle_roi)
@@ -512,6 +532,14 @@ class MainWindow(QMainWindow):
         self.settings_panel.toggleRoiVisibilityRequested.connect(self.preview_panel.set_roi_visibility)
         self.settings_panel.changeRoiColorRequested.connect(self.preview_panel.change_roi_color)
         self.preview_panel.roiListUpdated.connect(self.settings_panel.update_roi_list)
+        # Keep Feature panel's ROI dropdown in sync too
+        try:
+            self.preview_panel.roiListUpdated.connect(self.feature_panel.update_available_rois)
+            # Seed initial ROI list if any
+            if hasattr(self.preview_panel, 'roi_manager'):
+                self.feature_panel.update_available_rois(self.preview_panel.roi_manager.list_summary())
+        except Exception:
+            pass
         self.settings_panel.selectedRoiChanged.connect(self.preview_panel.set_active_roi)
         # Keep list selection in sync when a new ROI becomes active (e.g., just added)
         try:
@@ -519,10 +547,29 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Feature selection panel signals
+        try:
+            self.feature_panel.featureSettingsChanged.connect(self._update_reextract_visibility)
+            self.feature_panel.reExtractOnlyRequested.connect(self.run_feature_extraction_only)
+        except Exception:
+            pass
+
         # Provide overlay preview generator to SettingsPanel (for overlay ROI dialog)
         try:
             if hasattr(self.settings_panel, 'set_overlay_preview_provider') and hasattr(self.preview_panel, 'compute_overlay_preview'):
                 self.settings_panel.set_overlay_preview_provider(self.preview_panel.compute_overlay_preview)
+        except Exception:
+            pass
+
+        # --- Analysis Panel Connections ---
+        try:
+            self.analysis_panel.loadDataRequest.connect(self.load_analysis_data)
+            self.analysis_panel.runRankingAnalysis.connect(self.run_ranking_analysis)
+            # --- Connections for the heatmap buttons ---
+            self.analysis_panel.runUnivariateHeatmaps.connect(self.run_univariate_analysis_slot)
+            self.analysis_panel.runMultivariateHeatmap.connect(self.run_multivariate_analysis_slot)
+            # Result set selection
+            self.analysis_panel.useResultSetRequested.connect(self._process_loaded_files)
         except Exception:
             pass
 
@@ -534,13 +581,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # --- Analysis Panel Connections ---
-        self.analysis_panel.loadDataRequest.connect(self.load_analysis_data)
-        self.analysis_panel.runRankingAnalysis.connect(self.run_ranking_analysis)
-        
-        # --- Connections for the heatmap buttons ---
-        self.analysis_panel.runUnivariateHeatmaps.connect(self.run_univariate_analysis_slot)
-        self.analysis_panel.runMultivariateHeatmap.connect(self.run_multivariate_analysis_slot)
+        # Note: Analysis panel signal connections are made once in _connect_signals()
 
     def _save_settings(self):
         """Orchestrates gathering settings from all panels and saving to a JSON file."""
@@ -650,62 +691,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Settings loaded from {os.path.basename(filepath)}", 3000)
 
     def select_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Main Data Directory")
-        if not directory:
-            return
-        # Delegate to the central helper that scans, builds lists, updates phase sliders,
-        # and loads the initial preview image exactly once.
-        self._scan_and_update_main_dir(directory)
-
-    def select_output_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        """Open a folder dialog to choose the main data directory and rescan files."""
+        directory = QFileDialog.getExistingDirectory(self, "Select Data Directory")
         if directory:
-            self.output_directory = directory
-            self.out_dir_label.setText(self.output_directory)
-            self.statusBar().showMessage(f"Output directory set to: {directory}")
+            self._scan_and_update_main_dir(directory)
 
-    def _scan_and_update_main_dir(self, directory: str):
+    def run_feature_extraction_only(self):
+        """Placeholder for re-extract-only flow; currently informs user.
+        TODO: Wire to feature-only worker to skip collage and reuse current settings.
         """
-        Scans a given directory for image files, updates the internal state and UI,
-        and loads an initial preview image. This is the central logic.
-        """
-        self.main_directory = directory
-        # Update line edit without triggering editingFinished
         try:
-            self._suppress_dir_edit_handler = True
-            self.dir_label.setText(self.main_directory)
-            # Reset modified flag so first click doesn't fire editingFinished logic
-            try:
-                self.dir_label.setModified(False)
-            except Exception:
-                pass
-        finally:
-            self._suppress_dir_edit_handler = False
-        self.statusBar().showMessage("Scanning files...")
-        
-        self.grouped_files = group_files(self.main_directory)
-        if not self.grouped_files:
-            QMessageBox.warning(self, "No Files Found", "Could not find any valid TIFF files in the selected directory.")
-            self.statusBar().showMessage("Ready.")
-            return
-        
-        self.image_pair_list = []
-        for animal_data in self.grouped_files.values():
-            for time_data in animal_data.values():
-                if "WF" in time_data and "FL" in time_data:
-                    self.image_pair_list.append((time_data["WF"], time_data["FL"]))
-        self.image_pair_list.sort()
-
-        # Update phase sliders with time point count
-        if self.image_pair_list:
-            first_animal_key = next(iter(self.grouped_files.keys()))
-            num_time_points = len(self.grouped_files[first_animal_key])
-            self.feature_panel.update_phase_slider_range(num_time_points)
-
-        self.statusBar().showMessage(f"Found {len(self.grouped_files)} animals across {len(self.image_pair_list)} image pairs.")
-        
-        # Load an initial random image immediately after scanning is complete (forced once).
-        self.load_random_preview_image(force=True)
+            QMessageBox.information(self, "Re-Extract Features", "Feature-only re-extraction will be added next. For now, run full processing.")
+        except Exception:
+            pass
 
     def _on_main_dir_edited(self):
         """Handles manual edits to the main directory path."""
@@ -983,6 +981,21 @@ class MainWindow(QMainWindow):
         if not self.main_directory or not self.output_directory:
             QMessageBox.critical(self, "Input Required", "Please select both a data and an output directory.")
             return
+        # Ensure we actually have files to process (user might not have scanned a valid folder)
+        if not getattr(self, 'grouped_files', None) or len(self.grouped_files) == 0:
+            QMessageBox.warning(self, "No Files Found", "No valid WF/FL image pairs were found in the selected data directory. Please select a folder with TIFF files via 'Select Data Directory'.")
+            try:
+                self.statusBar().showMessage("No files found to process.")
+            except Exception:
+                pass
+            return
+        if not getattr(self, 'image_pair_list', None) or len(self.image_pair_list) == 0:
+            QMessageBox.warning(self, "No Pairs Found", "No WF/FL pairs were detected. Please verify your data directory.")
+            try:
+                self.statusBar().showMessage("No image pairs available for processing.")
+            except Exception:
+                pass
+            return
         settings = self.settings_panel.get_settings()
         if settings["use_registration"] and self.template_image is None:
             QMessageBox.critical(self, "Input Required", "Registration is enabled, but no reference template has been loaded.")
@@ -1009,7 +1022,738 @@ class MainWindow(QMainWindow):
         # --- We need the list of specific feature names for filtering ---
         # The get_feature_settings method needs to be updated to provide this.
         # For now, let's assume it does.
-        all_settings = {**visual_settings, **feature_settings}
+        # Include ROI definitions so the worker can use ROI masks for feature extraction
+        try:
+            rois_data = self.preview_panel.export_rois_data()
+        except Exception:
+            rois_data = []
+        all_settings = {**visual_settings, **feature_settings, "roi_list": rois_data}
+
+        # --- Track signature for this run ---
+        self._current_run_feature_signature = self._get_feature_signature()
+        # Provide a deterministic tag for filenames
+        tag = self._compute_feature_tag(self._current_run_feature_signature)
+        all_settings["feature_tag"] = tag
+
+        # Disable only configuration groups; keep control buttons responsive
+        try:
+            if hasattr(self.settings_panel, 'set_config_enabled'):
+                self.settings_panel.set_config_enabled(False)
+            else:
+                self.settings_panel.setEnabled(False)
+        except Exception:
+            self.settings_panel.setEnabled(False)
+        self.feature_panel.setEnabled(False) # Disable this panel too
+        self.dir_button.setEnabled(False)
+        self.out_dir_button.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        # 1. Create the thread and worker
+        print("--- DEBUG: Creating Worker and QThread ---")
+
+        self.worker_thread = QThread()
+        self.worker = Worker(self.grouped_files, all_settings, current_roi, self.output_directory)
+        
+        # 2. Move worker to the thread
+        self.worker.moveToThread(self.worker_thread)
+        
+        # 3. Connect signals
+        print("--- DEBUG: Connecting worker signals ---")
+
+        self.worker_thread.started.connect(self.worker.run)
+        
+        self.worker.finished.connect(self.worker_thread.quit) # Tell the thread to stop when worker is done
+        
+        # When the thread is finished, it's safe to delete everything and clean up
+        self.worker_thread.finished.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.finished.connect(self.on_processing_finished) # Call our cleanup/message slot LAST
+        
+        # Connect other signals
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.status.connect(self.statusBar().showMessage)
+        self.worker.error.connect(self.on_processing_error)
+        self.worker.featureCsvReady.connect(self.on_feature_csv_ready)
+
+        # 4. Start the thread
+        print("--- DEBUG: Starting worker thread ---")
+        # Reset outcome flags at the start of a run
+        self._proc_error_message = None
+        self._proc_aborted = False
+        self._proc_stopped = False
+
+        self.worker_thread.start()
+        print("--- DEBUG: run_processing END ---")
+        # Switch UI to processing controls
+        self._enter_processing_controls()
+        # Immediate user feedback
+        try:
+            self.statusBar().showMessage("Processing started…")
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def pause_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            if hasattr(self.worker, 'pause'):
+                self.worker.pause()
+            self.statusBar().showMessage("Processing paused.\u00A0")
+            self._enter_paused_controls()
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def resume_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            if hasattr(self.worker, 'resume'):
+                self.worker.resume()
+            self.statusBar().showMessage("Resuming processing…")
+            self._enter_processing_controls()
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def request_abort_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Abort Processing",
+            "Are you sure you want to abort the current processing run?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                # Mark as aborted by user for final outcome message
+                self._proc_aborted = True
+                if hasattr(self.worker, 'stop'):
+                    self.worker.stop()
+                self.statusBar().showMessage("Aborting…")
+            except Exception:
+                pass
+
+    @pyqtSlot()
+    def stop_processing(self):
+        if getattr(self, 'worker', None) is None:
+            return
+        try:
+            # Mark as stopped for final outcome message
+            self._proc_stopped = True
+            if hasattr(self.worker, 'stop'):
+                self.worker.stop()
+            self.statusBar().showMessage("Stopping…")
+        except Exception:
+            pass
+
+    @pyqtSlot(str)
+    def on_processing_error(self, error_message: str):
+        """Handle errors emitted from the worker thread in a centralized way."""
+        try:
+            self._proc_error_message = error_message or "Unknown error"
+            # Show in status bar immediately; detailed box will be shown on finish
+            self.statusBar().showMessage(f"Failed: {self._proc_error_message}")
+        except Exception:
+            pass
+
+    @pyqtSlot()
+    def on_processing_finished(self):
+        """Clean up UI and inform the user about the processing outcome."""
+        try:
+            # Hide progress and re-enable controls
+            self.progress_bar.setVisible(False)
+            try:
+                if hasattr(self.settings_panel, 'set_config_enabled'):
+                    self.settings_panel.set_config_enabled(True)
+                else:
+                    self.settings_panel.setEnabled(True)
+            except Exception:
+                self.settings_panel.setEnabled(True)
+            try:
+                self.feature_panel.setEnabled(True)
+            except Exception:
+                pass
+            try:
+                self.dir_button.setEnabled(True)
+                self.out_dir_button.setEnabled(True)
+            except Exception:
+                pass
+
+            # Footer controls back to idle
+            self._enter_idle_controls()
+
+            # Outcome messaging
+            if self._proc_error_message:
+                QMessageBox.critical(self, "Processing Error", self._proc_error_message)
+                self.statusBar().showMessage(f"Failed: {self._proc_error_message}")
+            elif self._proc_aborted:
+                QMessageBox.information(self, "Aborted", "Processing was aborted by the user.")
+                self.statusBar().showMessage("Processing aborted.")
+            elif self._proc_stopped:
+                QMessageBox.information(self, "Stopped", "Processing was stopped.")
+                self.statusBar().showMessage("Processing stopped.")
+            else:
+                self.statusBar().showMessage("Processing complete!")
+                # Optional success dialog for clear feedback
+                QMessageBox.information(self, "Success", "Batch processing has completed successfully!")
+        finally:
+            # Clear worker/thread refs
+            try:
+                self.worker_thread = None
+            except Exception:
+                pass
+            try:
+                self.worker = None
+            except Exception:
+                pass
+
+    @pyqtSlot(str)
+    def on_feature_csv_ready(self, raw_path: str):
+        """
+        This slot now ONLY loads the data and enables the analysis UI.
+        It no longer automatically triggers the next analysis step.
+        """
+        self.statusBar().showMessage("Feature CSVs created. Loading data for analysis panels...")
+        
+        # Record the signature that produced this file
+        if self._current_run_feature_signature is not None:
+            self._last_feature_signature = self._current_run_feature_signature
+            self._current_run_feature_signature = None
+        # Hide the re-extract button (we are up-to-date now)
+        try:
+            self.feature_panel.set_reextract_visible(False)
+        except Exception:
+            pass
+        # Refresh available result sets in Analysis panel
+        self._refresh_available_result_sets()
+        
+        # We still call _process_loaded_files to load the data into memory
+        # and populate the dropdowns.
+        self._process_loaded_files(raw_path)
+        print("\n--- DEBUG: End of on_feature_csv_ready. ---")
+
+
+    def load_analysis_data(self):
+        """Opens a file dialog for the user to select any feature CSV."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Load Feature CSV File", 
+            "", 
+            "Feature CSV Files (*_Results.csv *_Summary.csv)"
+        )
+        if filepath:
+            self._process_loaded_files(filepath)
+
+    def _process_loaded_files(self, filepath: str):
+        """
+        Central logic to handle loading either a Raw or Summary CSV.
+        """
+        self.raw_csv_path = None
+        self.summary_csv_path = None
+        self.raw_features_df = None
+        
+        try:
+            if filepath.endswith("_Raw_Results.csv"):
+                self.raw_csv_path = filepath
+                self.statusBar().showMessage(f"Loading raw data from {os.path.basename(filepath)}...")
+                self.raw_features_df = pd.read_csv(self.raw_csv_path)
+                # Normalize feature names by stripping leading 'original' prefixes if present
+                try:
+                    id_cols = ['group_name', 'Group_Number', 'Sex', 'Dose', 'Treatment', 'animal_key', 'time_min']
+                    rename_map = {}
+                    for col in list(self.raw_features_df.columns):
+                        if col in id_cols:
+                            continue
+                        new_col = col
+                        for sep in ['_', '.', ' ']:
+                            prefix = f"original{sep}"
+                            if new_col.startswith(prefix):
+                                new_col = new_col[len(prefix):]
+                                break
+                        if new_col != col:
+                            rename_map[col] = new_col
+                    if rename_map:
+                        self.raw_features_df.rename(columns=rename_map, inplace=True)
+                except Exception:
+                    pass
+                
+                self.statusBar().showMessage("Generating summary statistics from raw data...")
+                summary_df = summarize_features_by_group(self.raw_features_df.copy())
+                
+                if not summary_df.empty:
+                    # Persist the summary to disk so downstream heatmap generation can read it
+                    self.summary_csv_path = self.raw_csv_path.replace("_Raw_Results.csv", "_Group_Summary.csv")
+                    try:
+                        summary_df.to_csv(self.summary_csv_path, index=False)
+                    except Exception as e:
+                        # Fall back to disabling heatmaps if we cannot write the file
+                        self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=False)
+                        self.statusBar().showMessage(f"Summary generated but could not be saved: {e}. Heatmaps disabled.")
+                    else:
+                        self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=True)
+                        self.statusBar().showMessage("Raw data loaded. All analyses enabled.")
+                else:
+                    self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=False)
+                    self.statusBar().showMessage("Raw data loaded. Summary generation failed. Heatmaps disabled.")
+
+                # After loading the raw data, we now have the info needed to populate the dropdowns.
+                all_groups = sorted(self.raw_features_df['group_name'].unique())
+                potential_factors = ['Sex', 'Dose', 'Treatment', 'Group_Number']
+                available_factors = [f for f in potential_factors if f in self.raw_features_df.columns]
+                
+                # --- DEBUGGING BLOCK ---
+                print("\n--- DEBUG: Inside MainWindow._process_loaded_files ---")
+                all_groups = sorted(self.raw_features_df['group_name'].unique())
+                potential_factors = ['Sex', 'Dose', 'Treatment', 'Group_Number']
+                available_factors = [f for f in potential_factors if f in self.raw_features_df.columns]
+                
+                print(f"Found Groups: {all_groups}")
+                print(f"Found Factors: {available_factors}")
+                print("Calling analysis_panel.populate_factor_dropdowns...")
+
+                # Call the function in AnalysisPanel to update its UI
+                self.analysis_panel.populate_factor_dropdowns(available_factors, all_groups)
+
+                print("--- DEBUG: Finished populate_factor_dropdowns call ---\n")       
+                print("--- DEBUG: Automatically run the initial overall ranking ---\n")       
+
+                # Automatically run the initial overall ranking
+                self.run_ranking_analysis({"type": "Overall"})
+                print("--- DEBUG: Done with Automatically run the initial overall ranking ---\n")       
+
+
+
+            elif filepath.endswith("_Group_Summary.csv"):
+                self.summary_csv_path = filepath
+                self.statusBar().showMessage(f"Loaded summary data from {os.path.basename(filepath)}. Heatmap analysis enabled.")
+                self.analysis_panel.enable_buttons(raw_csv_ready=False, summary_csv_ready=True)
+                # We can't populate hypothesis dropdowns from summary data, so we clear them
+                self.analysis_panel.populate_factor_dropdowns([], [])
+            
+            else:
+                QMessageBox.warning(self, "Invalid File Type", "Please select a valid '_Raw_Results.csv' or '_Group_Summary.csv' file.")
+                self.analysis_panel.enable_buttons(raw_csv_ready=False, summary_csv_ready=False)
+                return
+
+            self.analysis_panel.set_loaded_file_label(filepath)
+
+        except Exception as e:
+            error_str = f"An error occurred while loading or processing the CSV file: {e}\n\n{traceback.format_exc()}"
+            QMessageBox.critical(self, "File Load Error", error_str)
+            self.analysis_panel.set_loaded_file_label("")
+            self.analysis_panel.enable_buttons(raw_csv_ready=False, summary_csv_ready=False)
+
+    @pyqtSlot(dict)
+    def run_ranking_analysis(self, params: dict):
+        """
+        Launches the RankingWorker thread. This is the slot connected to the UI.
+        """
+        if self.raw_features_df is None or self.raw_features_df.empty:
+            QMessageBox.warning(self, "No Data", "Raw feature data is not loaded.")
+            return
+
+        # Dynamically get factor levels for Interaction analysis
+        if params.get("type") == "Interaction":
+            factor1 = self.analysis_panel.factor1_combo.currentText()
+            factor2 = self.analysis_panel.factor2_combo.currentText()
+            if not factor1 or not factor2 or factor1 == factor2:
+                QMessageBox.warning(self, "Invalid Selection", "Please select two different factors.")
+                return
+            f1_levels = sorted(self.raw_features_df[factor1].unique().tolist())
+            f2_levels = sorted(self.raw_features_df[factor2].unique().tolist())
+            if len(f1_levels) < 2 or len(f2_levels) < 2:
+                QMessageBox.warning(self, "Invalid Data", "Both factors must have at least 2 levels.")
+                return
+            params["factor1_col"], params["factor1_levels"] = factor1, f1_levels[:2]
+            params["factor2_col"], params["factor2_levels"] = factor2, f2_levels[:2]
+        
+        self.analysis_panel.setEnabled(False)
+        self.statusBar().showMessage(f"Running '{params.get('type')}' ranking analysis...")
+        
+        self.ranking_thread = QThread()
+        self.ranking_worker = RankingWorker(self.raw_features_df, params)
+        self.ranking_worker.moveToThread(self.ranking_thread)
+        
+        self.ranking_thread.started.connect(self.ranking_worker.run)
+        self.ranking_worker.error.connect(lambda msg: QMessageBox.critical(self, "Ranking Error", msg))
+        # Accept the emitted error string to match the signal signature and ensure the panel re-enables on error
+        self.ranking_worker.error.connect(lambda msg: self.analysis_panel.setEnabled(True))
+        self.ranking_worker.finished.connect(self.on_ranking_finished)
+        self.ranking_worker.finished.connect(self.ranking_thread.quit)
+        self.ranking_worker.finished.connect(self.ranking_worker.deleteLater)
+        self.ranking_thread.finished.connect(self.ranking_thread.deleteLater)
+        self.ranking_thread.start()
+
+    @pyqtSlot(pd.DataFrame, dict)
+    def on_ranking_finished(self, results_df, params):
+        """
+        This slot receives the results from the RankingWorker and updates the UI.
+        """
+        analysis_type = params.get("type", "Unknown")
+        metadata = f"Feature Ranking Results\nAnalysis Type: {analysis_type}\n"
+        if analysis_type == "Interaction":
+            metadata += f"Factor 1: {params['factor1_col']} (Levels: {', '.join(params['factor1_levels'])})\n"
+            metadata += f"Factor 2: {params['factor2_col']} (Levels: {', '.join(params['factor2_levels'])})"
+        elif analysis_type == "Normalization":
+            metadata += f"Baseline: {params['baseline_group']}\nAffected: {params['affected_group']}\nTreated: {params['treated_group']}"
+        elif analysis_type == "Overall":
+            if results_df is not None and not results_df.empty:
+                score_columns = [col for col in results_df.columns if col != 'Feature']
+                metadata += "Based on: " + " and ".join(score_columns)
+        
+        self.analysis_panel.set_analysis_metadata(metadata)
+        self.analysis_panel.display_ranking_results(results_df)
+        self.statusBar().showMessage(f"'{analysis_type}' ranking complete.")
+        self.analysis_panel.setEnabled(True)
+
+    def on_summary_csv_selected(self, path: str):
+        """Slot for when user manually loads a summary CSV for heatmaps."""
+        self.summary_csv_path = path
+        # Enable only the heatmap buttons
+        self.analysis_panel.enable_buttons(raw_csv_ready=False, summary_csv_ready=True)
+        self.statusBar().showMessage(f"Loaded summary file: {os.path.basename(path)}")
+
+    @pyqtSlot(str, bool, str)
+    def run_univariate_analysis_slot(self, _, show_plot, agg_method):
+        """Slot specifically for the univariate button."""
+        self._launch_heatmap_worker('univariate', show_plot, agg_method)
+        
+
+    def _on_main_dir_edited(self):
+        """Handles manual edits to the main directory path."""
+        # Ignore programmatic updates or non-modified focus losses
+        if getattr(self, '_suppress_dir_edit_handler', False):
+            return
+        try:
+            if hasattr(self.dir_label, 'isModified') and not self.dir_label.isModified():
+                return
+        except Exception:
+            pass
+        path = self.dir_label.text()
+        if os.path.isdir(path):
+            # --- MODIFIED: Call the new helper function ---
+            self._scan_and_update_main_dir(path)
+            # --- END MODIFICATION ---
+        elif path != self.main_directory: # Only show warning if text actually changed to something invalid
+            QMessageBox.warning(self, "Invalid Path", "The entered main directory path does not exist.")
+            try:
+                self._suppress_dir_edit_handler = True
+                self.dir_label.setText(self.main_directory if self.main_directory else "Not selected.")
+                try:
+                    self.dir_label.setModified(False)
+                except Exception:
+                    pass
+            finally:
+                self._suppress_dir_edit_handler = False
+
+    def _on_out_dir_edited(self):
+        """Handles manual edits to the output directory path."""
+        if getattr(self, '_suppress_out_dir_edit_handler', False):
+            return
+        try:
+            if hasattr(self.out_dir_label, 'isModified') and not self.out_dir_label.isModified():
+                return
+        except Exception:
+            pass
+        path = self.out_dir_label.text()
+        if os.path.isdir(path):
+            self.output_directory = path
+            self.statusBar().showMessage(f"Output directory set to: {path}")
+        elif path != self.output_directory:
+            QMessageBox.warning(self, "Invalid Path", "The entered output directory path does not exist.")
+            try:
+                self._suppress_out_dir_edit_handler = True
+                self.out_dir_label.setText(self.output_directory if self.output_directory else "Not selected.")
+                try:
+                    self.out_dir_label.setModified(False)
+                except Exception:
+                    pass
+            finally:
+                self._suppress_out_dir_edit_handler = False
+
+    def _load_preview_by_index(self, index: int):
+        """Helper function to load an image pair by its index in the list."""
+        if not self.image_pair_list or not (0 <= index < len(self.image_pair_list)):
+            return
+        self.current_preview_index = index
+        self.current_preview_paths = self.image_pair_list[self.current_preview_index]
+        # This explicit call was missing, causing the delay
+        self.update_live_preview()
+
+    def load_previous_preview_image(self):
+        """Loads the previous image in the list, wrapping around if necessary."""
+        if not self.image_pair_list: return
+        new_index = (self.current_preview_index - 1) % len(self.image_pair_list)
+        self._load_preview_by_index(new_index)
+
+    def load_next_preview_image(self):
+        """Loads the next image in the list, wrapping around if necessary."""
+        if not self.image_pair_list: return
+        new_index = (self.current_preview_index + 1) % len(self.image_pair_list)
+        self._load_preview_by_index(new_index)
+        
+    def load_random_preview_image(self, force: bool = False):
+        """Load a random image. If force is False, ignore spurious calls after initial load.
+        This prevents an unexpected first-click randomization if something emits the signal once.
+        """
+        if not self.image_pair_list:
+            return
+        # Guard: only allow randomization if explicitly forced (button click or initial load)
+        if not force and getattr(self, '_did_initial_random', False):
+            # Optional: small status message for diagnostics
+            try:
+                self.statusBar().showMessage("Ignoring non-forced random image request (guard active)", 1500)
+            except Exception:
+                pass
+            return
+        self._did_initial_random = True
+        new_index = random.randint(0, len(self.image_pair_list) - 1)
+        self._load_preview_by_index(new_index)
+        # Optional: show which index was loaded for quick verification
+        try:
+            self.statusBar().showMessage(f"Loaded random preview (index {new_index})", 1500)
+       
+        except Exception:
+            pass
+
+    def load_specific_preview_image(self, filepath: str):
+        parsed = parse_filename(filepath)
+        if not parsed:
+            QMessageBox.warning(self, "Parse Error", "Could not understand the format of the selected filename.")
+            return
+        animal_key = f"{parsed['date']}_{parsed['animal_id']}"
+        time_point = parsed['time']
+        try:
+            pair_data = self.grouped_files[animal_key][time_point]
+            if "WF" in pair_data and "FL" in pair_data:
+                pair_to_find = (pair_data['WF'], pair_data['FL'])
+                if pair_to_find in self.image_pair_list:
+                    new_index = self.image_pair_list.index(pair_to_find)
+                    self._load_preview_by_index(new_index)
+                else:
+                    QMessageBox.warning(self, "Not Found", "The image pair exists but could not be located in the preview list.")
+            else:
+                QMessageBox.warning(self, "Pair Incomplete", "The corresponding WF or FL image for the selected file is missing.")
+        except KeyError:
+            QMessageBox.warning(self, "Pair Not Found", "Could not find the corresponding animal or timepoint data.")
+
+    def load_template_image(self, path: str):
+        if path is None:
+            self.template_image = None
+            return
+        try:
+            self.template_image = imread(path)
+            self.statusBar().showMessage("Reference template loaded successfully.")
+            # Immediately refresh preview so registration info shows up
+            try:
+                self.update_live_preview()
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not load template image: {e}")
+            self.template_image = None
+
+    def update_live_preview(self):
+        wf_path, fl_path = self.current_preview_paths
+        if not wf_path or not fl_path:
+            self.preview_panel.set_file_info("N/A", "N/A")
+            return
+        self.preview_panel.set_file_info(wf_path, fl_path)
+        try:
+            # Use cache if paths unchanged
+            if (self._preview_cache.get('wf_path') != wf_path) or (self._preview_cache.get('fl_path') != fl_path):
+                wf_image = imread(wf_path)
+                fl_image = imread(fl_path)
+                self._preview_cache.update({'wf_path': wf_path, 'fl_path': fl_path, 'wf_image': wf_image, 'fl_image': fl_image})
+            else:
+                wf_image = self._preview_cache.get('wf_image')
+                fl_image = self._preview_cache.get('fl_image')
+            settings = self.settings_panel.get_settings() # We already get the settings here
+            
+            fl_rgb = apply_lut(fl_image, settings["min_intensity"], settings["max_intensity"], settings["lut"])
+            overlay_image = create_overlay(wf_image, fl_rgb, settings["transparency"]) 
+
+            # Update registration info overlay (dx, dy, theta)
+            try:
+                use_reg = bool(settings.get("use_registration", False))
+                tmpl = getattr(self, 'template_image', None)
+                if use_reg and tmpl is not None:
+                    import cv2
+                    import numpy as np
+                    # Replicate registration translation computation without warping
+                    wf_gray = cv2.normalize(wf_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    tmpl_gray = cv2.normalize(tmpl, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    result = cv2.matchTemplate(wf_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+                    _minVal, _maxVal, _minLoc, maxLoc = cv2.minMaxLoc(result)
+                    h_img, w_img = wf_gray.shape[:2]
+                    h_tmpl, w_tmpl = tmpl_gray.shape[:2]
+                    match_cx = maxLoc[0] + w_tmpl / 2.0
+                    match_cy = maxLoc[1] + h_tmpl / 2.0
+                    frame_cx = w_img / 2.0
+                    frame_cy = h_img / 2.0
+                    dx = frame_cx - match_cx
+                    dy = frame_cy - match_cy
+                    # Estimate rotation angle using feature matching + affine model (robust to large rotations)
+                    theta_deg = 0.0
+                    try:
+                        orb = cv2.ORB_create(nfeatures=800)
+                        kf1, des1 = orb.detectAndCompute(wf_gray, None)
+                        kf2, des2 = orb.detectAndCompute(tmpl_gray, None)
+                        if des1 is not None and des2 is not None and len(kf1) >= 8 and len(kf2) >= 8:
+                            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                            matches = bf.knnMatch(des2, des1, k=2)  # template -> frame direction
+                            good = []
+                            for m, n in matches:
+                                if m.distance < 0.75 * n.distance:
+                                    good.append(m)
+                            if len(good) >= 8:
+                                src_pts = np.float32([kf2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)  # template
+                                dst_pts = np.float32([kf1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)  # frame
+                                M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                                if M is not None:
+                                    angle_rad = np.arctan2(M[1, 0], M[0, 0])
+                                    theta_deg = float(np.degrees(angle_rad))
+                    except Exception:
+                        theta_deg = 0.0
+                    self.preview_panel.set_registration_info(dx, dy, theta_deg, enabled=True)
+                else:
+                    self.preview_panel.set_registration_info(0.0, 0.0, 0.0, enabled=False)
+            except Exception:
+                # Hide on error to avoid stale values
+                try:
+                    self.preview_panel.set_registration_info(0.0, 0.0, 0.0, enabled=False)
+                except Exception:
+                    pass
+
+            # Draw animal outline directly on the preview image if enabled (robust to overlay widget issues)
+            try:
+                if bool(settings.get("show_animal_outline", False)):
+                    source = str(settings.get("animal_outline_source", 'WF'))
+                    method_raw = str(settings.get("animal_outline_method", 'otsu')).lower()
+                    # Defensive: accept labels like 'manual threshold' as 'manual'
+                    method = 'manual' if method_raw.startswith('manual') else ('otsu' if method_raw.startswith('otsu') else method_raw)
+                    manual_thresh = int(settings.get("animal_outline_threshold", 5000)) if method == 'manual' else None
+                    otsu_boost = int(settings.get("animal_outline_otsu_boost", 10))
+                    color_val = settings.get("animal_outline_color", (0, 255, 0, 255))
+                    if isinstance(color_val, (tuple, list)) and len(color_val) >= 3:
+                        color_rgb = (int(color_val[0]), int(color_val[1]), int(color_val[2]))
+                    elif isinstance(color_val, str) and color_val.startswith('#'):
+                        from PyQt6.QtGui import QColor
+                        qc = QColor(color_val)
+                        color_rgb = (qc.red(), qc.green(), qc.blue())
+                    else:
+                        color_rgb = (0, 255, 0)
+                    src_img = wf_image if source == 'WF' else fl_image
+                    # Update manual-threshold control range to match data's max intensity
+                    try:
+                        if hasattr(self, 'settings_panel') and hasattr(self.settings_panel, 'set_outline_threshold_max') and src_img is not None:
+                            # Compute maximum intensity from the source image
+                            import numpy as np
+                            # Use overall max across all channels/frames as an upper bound
+                            max_val = int(np.max(src_img))
+                            self.settings_panel.set_outline_threshold_max(max_val)
+                    except Exception:
+                        pass
+                    contour = compute_animal_outline(src_img, method=method, threshold=manual_thresh, otsu_boost_percent=otsu_boost)
+                    if contour is None and source == 'FL':  # Graceful fallback to WF if FL failed
+                        contour = compute_animal_outline(wf_image, method=method, threshold=manual_thresh, otsu_boost_percent=otsu_boost)
+                    if contour is not None:
+                        overlay_image = draw_outline_on_image(overlay_image, contour, color_rgb, thickness=3)
+            except Exception:
+                # Non-fatal for preview
+                pass
+            
+            if not overlay_image.flags['C_CONTIGUOUS']:
+                overlay_image = np.ascontiguousarray(overlay_image)
+            h, w, ch = overlay_image.shape
+            q_image = QImage(overlay_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
+            
+            # --- MODIFIED: Pass the 'settings' dictionary to the preview panel ---
+            self.preview_panel.update_preview(QPixmap.fromImage(q_image.copy()), settings)
+            # --- END MODIFICATION ---
+
+        except Exception as e:
+            self.statusBar().showMessage(f"Error updating preview: {e}")
+
+    def _get_first_image_size(self) -> tuple[int, int]:
+        """Return (width, height) of the first available WF image, or (0,0) if unavailable."""
+        try:
+            if self.image_pair_list:
+                wf_path, _ = self.image_pair_list[0]
+                img = imread(wf_path)
+                if img is not None:
+                    # tifffile returns arrays as HxW or HxWxC
+                    h, w = img.shape[:2]
+                    return (int(w), int(h))
+        except Exception:
+            pass
+        return (0, 0)
+
+    def run_processing(self):
+
+        print("\n--- DEBUG: run_processing START ---")
+
+        if not self.main_directory or not self.output_directory:
+            QMessageBox.critical(self, "Input Required", "Please select both a data and an output directory.")
+            return
+        # Ensure we actually have files to process (user might not have scanned a valid folder)
+        if not getattr(self, 'grouped_files', None) or len(self.grouped_files) == 0:
+            QMessageBox.warning(self, "No Files Found", "No valid WF/FL image pairs were found in the selected data directory. Please select a folder with TIFF files via 'Select Data Directory'.")
+            try:
+                self.statusBar().showMessage("No files found to process.")
+            except Exception:
+                pass
+            return
+        if not getattr(self, 'image_pair_list', None) or len(self.image_pair_list) == 0:
+            QMessageBox.warning(self, "No Pairs Found", "No WF/FL pairs were detected. Please verify your data directory.")
+            try:
+                self.statusBar().showMessage("No image pairs available for processing.")
+            except Exception:
+                pass
+            return
+        settings = self.settings_panel.get_settings()
+        if settings["use_registration"] and self.template_image is None:
+            QMessageBox.critical(self, "Input Required", "Registration is enabled, but no reference template has been loaded.")
+            return
+        # Honor Apply Crop option
+        apply_crop = bool(settings.get("apply_crop", True))
+        if apply_crop:
+            current_roi = self.preview_panel.get_roi()
+            if current_roi.isNull() or current_roi.width() <= 1 or current_roi.height() <= 1:
+                QMessageBox.critical(self, "Input Required", "Please select a valid cropping region (ROI).")
+                return
+        else:
+            # Use full-frame ROI derived from the first image
+            w, h = self._get_first_image_size()
+            if w <= 0 or h <= 0:
+                # Fallback to current ROI if size couldn't be determined
+                current_roi = self.preview_panel.get_roi()
+            else:
+                current_roi = QRect(0, 0, w, h)
+
+        visual_settings = self.settings_panel.get_settings()
+        feature_settings = self.feature_panel.get_feature_settings()
+
+        # --- We need the list of specific feature names for filtering ---
+        # The get_feature_settings method needs to be updated to provide this.
+        # For now, let's assume it does.
+        # Include ROI definitions so the worker can use ROI masks for feature extraction
+        try:
+            rois_data = self.preview_panel.export_rois_data()
+        except Exception:
+            rois_data = []
+        all_settings = {**visual_settings, **feature_settings, "roi_list": rois_data}
+
+        # --- Track signature for this run ---
+        self._current_run_feature_signature = self._get_feature_signature()
+        # Provide a deterministic tag for filenames
+        tag = self._compute_feature_tag(self._current_run_feature_signature)
+        all_settings["feature_tag"] = tag
 
         # Disable only configuration groups; keep control buttons responsive
         try:
@@ -1135,6 +1879,18 @@ class MainWindow(QMainWindow):
         """
         self.statusBar().showMessage("Feature CSVs created. Loading data for analysis panels...")
         
+        # Record the signature that produced this file
+        if self._current_run_feature_signature is not None:
+            self._last_feature_signature = self._current_run_feature_signature
+            self._current_run_feature_signature = None
+        # Hide the re-extract button (we are up-to-date now)
+        try:
+            self.feature_panel.set_reextract_visible(False)
+        except Exception:
+            pass
+        # Refresh available result sets in Analysis panel
+        self._refresh_available_result_sets()
+        
         # We still call _process_loaded_files to load the data into memory
         # and populate the dropdowns.
         self._process_loaded_files(raw_path)
@@ -1165,14 +1921,41 @@ class MainWindow(QMainWindow):
                 self.raw_csv_path = filepath
                 self.statusBar().showMessage(f"Loading raw data from {os.path.basename(filepath)}...")
                 self.raw_features_df = pd.read_csv(self.raw_csv_path)
+                # Normalize feature names by stripping leading 'original' prefixes if present
+                try:
+                    id_cols = ['group_name', 'Group_Number', 'Sex', 'Dose', 'Treatment', 'animal_key', 'time_min']
+                    rename_map = {}
+                    for col in list(self.raw_features_df.columns):
+                        if col in id_cols:
+                            continue
+                        new_col = col
+                        for sep in ['_', '.', ' ']:
+                            prefix = f"original{sep}"
+                            if new_col.startswith(prefix):
+                                new_col = new_col[len(prefix):]
+                                break
+                        if new_col != col:
+                            rename_map[col] = new_col
+                    if rename_map:
+                        self.raw_features_df.rename(columns=rename_map, inplace=True)
+                except Exception:
+                    pass
                 
                 self.statusBar().showMessage("Generating summary statistics from raw data...")
                 summary_df = summarize_features_by_group(self.raw_features_df.copy())
                 
                 if not summary_df.empty:
+                    # Persist the summary to disk so downstream heatmap generation can read it
                     self.summary_csv_path = self.raw_csv_path.replace("_Raw_Results.csv", "_Group_Summary.csv")
-                    self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=True)
-                    self.statusBar().showMessage("Raw data loaded. All analyses enabled.")
+                    try:
+                        summary_df.to_csv(self.summary_csv_path, index=False)
+                    except Exception as e:
+                        # Fall back to disabling heatmaps if we cannot write the file
+                        self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=False)
+                        self.statusBar().showMessage(f"Summary generated but could not be saved: {e}. Heatmaps disabled.")
+                    else:
+                        self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=True)
+                        self.statusBar().showMessage("Raw data loaded. All analyses enabled.")
                 else:
                     self.analysis_panel.enable_buttons(raw_csv_ready=True, summary_csv_ready=False)
                     self.statusBar().showMessage("Raw data loaded. Summary generation failed. Heatmaps disabled.")
@@ -1257,7 +2040,8 @@ class MainWindow(QMainWindow):
         
         self.ranking_thread.started.connect(self.ranking_worker.run)
         self.ranking_worker.error.connect(lambda msg: QMessageBox.critical(self, "Ranking Error", msg))
-        self.ranking_worker.error.connect(lambda: self.analysis_panel.setEnabled(True))
+        # Accept the emitted error string to match the signal signature and ensure the panel re-enables on error
+        self.ranking_worker.error.connect(lambda msg: self.analysis_panel.setEnabled(True))
         self.ranking_worker.finished.connect(self.on_ranking_finished)
         self.ranking_worker.finished.connect(self.ranking_thread.quit)
         self.ranking_worker.finished.connect(self.ranking_worker.deleteLater)
@@ -1390,100 +2174,144 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Analysis failed.")
         self.analysis_panel.enable_analysis_button(True)
 
-    @pyqtSlot()
-    def on_processing_finished(self):
-        print("\n--- DEBUG: on_processing_finished START ---")
-        # Decide the correct final popup based on outcome flags
-        if self._proc_error_message:
-            # Error popup already shown in on_processing_error; just avoid showing success
-            self.statusBar().showMessage("Processing finished with errors.")
-        elif self._proc_aborted:
-            self.statusBar().showMessage("Processing aborted by user.")
-            try:
-                QMessageBox.information(self, "Aborted", "Batch processing was aborted by the user.")
-            except Exception:
-                pass
-        elif self._proc_stopped:
-            self.statusBar().showMessage("Processing stopped.")
-            try:
-                QMessageBox.information(self, "Stopped", "Batch processing was stopped. Partial outputs may exist.")
-            except Exception:
-                pass
-        else:
-            self.statusBar().showMessage("Processing complete!")
-            try:
-                QMessageBox.information(self, "Success", "Batch processing completed successfully.")
-            except Exception:
-                pass
-        
-        self._reset_ui_after_processing()
-        print("--- DEBUG: on_processing_finished END ---")
-
-    @pyqtSlot(str)
-    def on_processing_error(self, error_message: str):
-        print(f"\n--- DEBUG: on_processing_error START with message: {error_message} ---")
-        # Track error for final outcome decision and show an immediate error popup
-        self._proc_error_message = error_message
-        QMessageBox.critical(self, "Processing Error", error_message)
-        self.statusBar().showMessage(f"Failed: {error_message}")
-        print("--- DEBUG: on_processing_error END ---")
-    
-    def _reset_ui_after_processing(self):
-        print("\n--- DEBUG: _reset_ui_after_processing START ---")
-        self.progress_bar.setVisible(False)
-        # Re-enable configuration groups after processing
+    def _auto_load_latest_feature_csv(self) -> bool:
+        """Fallback: attempt to auto-load the latest Raw Results CSV in the output directory."""
         try:
-            if hasattr(self.settings_panel, 'set_config_enabled'):
-                self.settings_panel.set_config_enabled(True)
-            else:
-                self.settings_panel.setEnabled(True)
+            if not self.output_directory or not os.path.isdir(self.output_directory):
+                return False
+            candidates = []
+            for name in os.listdir(self.output_directory):
+                if name.endswith("_Raw_Results.csv"):
+                    full_path = os.path.join(self.output_directory, name)
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                    except Exception:
+                        mtime = 0
+                    candidates.append((mtime, full_path))
+            if not candidates:
+                return False
+            candidates.sort(reverse=True)
+            latest = candidates[0][1]
+            self._process_loaded_files(latest)
+            return True
         except Exception:
-            self.settings_panel.setEnabled(True)
-        self.feature_panel.setEnabled(True)
-        self.dir_button.setEnabled(True)
-        self.out_dir_button.setEnabled(True)
+            return False
+
+    def _refresh_available_result_sets(self):
+        """Scan output dir for Raw Results CSVs and push into Analysis panel combo."""
         try:
-            self._enter_idle_controls()
+            if not self.output_directory or not os.path.isdir(self.output_directory):
+                self.analysis_panel.update_available_result_sets([])
+                return
+            paths = []
+            for name in os.listdir(self.output_directory):
+                if name.endswith("_Raw_Results.csv"):
+                    paths.append(os.path.join(self.output_directory, name))
+            self.analysis_panel.update_available_result_sets(sorted(paths))
         except Exception:
             pass
-        
-        print("--- DEBUG: Clearing worker and thread references. ---")
-        self.worker_thread = None
-        self.worker = None
-        print("--- DEBUG: _reset_ui_after_processing END ---")
 
-    def closeEvent(self, event):
-        print("\n--- DEBUG: closeEvent START ---")
-        # This is a fallback. The parent/child model is the primary solution.
-        for name, thread in [("Worker", self.worker_thread), ("Ranking", self.ranking_thread), ("Heatmap", self.heatmap_thread)]:
-            if thread is not None and thread.isRunning():
-                print(f"--- DEBUG: {name} thread is running. Quitting and waiting... ---")
-                thread.quit()
-                thread.wait(1000) # Wait a second for it to finish
-                print(f"--- DEBUG: {name} thread finished waiting. ---")
-        print("--- DEBUG: Accepting close event. ---")
-        event.accept()
-
-    def __del__(self):
-        print("\n--- DEBUG: MainWindow object is being destroyed. ---")
-
-
-
-
-class HypothesisWorker(QObject):
-    finished = pyqtSignal(pd.DataFrame, dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, raw_df, params, parent=None):
-        super().__init__(parent)
-        self.raw_df = raw_df
-        self.params = params
-
-    def run(self):
+    def _get_feature_signature(self):
+        """Build a tuple uniquely describing current feature extraction config."""
         try:
-            results_df = rank_features_for_hypothesis(self.raw_df, self.params)
-            self.finished.emit(results_df, self.params)
-            
-        except Exception as e:
-            import traceback
-            self.error.emit(f"An error occurred during hypothesis analysis: {e}\n\n{traceback.format_exc()}")
+            feat = self.feature_panel.get_feature_settings()
+            mode = str(feat.get("feature_region_mode", "crop"))
+            roi_part = None
+            if mode == "roi":
+                roi_part = int(feat.get("feature_region_roi_id") or -1)
+            elif mode == "crop":
+                r = self.preview_panel.get_roi()
+                roi_part = (int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+            else:
+                roi_part = ("full",)
+            features = tuple(sorted([str(f) for f in feat.get("selected_features_list", [])]))
+            # Only include feature extraction aspects in the signature
+            return (mode, roi_part, features)
+        except Exception:
+            return None
+
+    def _compute_feature_tag(self, signature) -> str:
+        """Create a compact, deterministic tag for filenames from a signature."""
+        try:
+            if not signature:
+                return ""
+            import hashlib
+            mode, roi_part, features = signature
+            if mode == "roi":
+                region = f"roi{roi_part}"
+            elif mode == "crop" and isinstance(roi_part, tuple) and len(roi_part) == 4:
+                region = f"crop{roi_part[2]}x{roi_part[3]}"
+            else:
+                region = "full"
+            feat_str = ",".join(features)
+            h = hashlib.md5(feat_str.encode("utf-8")).hexdigest()[:8]
+            return f"feat-{region}-{h}"
+        except Exception:
+            return ""
+
+    def _update_reextract_visibility(self):
+        """Show the green re-extract button when current feature config differs from last processed."""
+        try:
+            # Must have some data processed/loaded to compare against
+            has_data = self.raw_features_df is not None and not self.raw_features_df.empty
+            feat = self.feature_panel.get_feature_settings()
+            enabled = bool(feat.get("enable_features", False))
+            current_sig = self._get_feature_signature()
+            visible = bool(has_data and enabled and self._last_feature_signature and (current_sig != self._last_feature_signature))
+            self.feature_panel.set_reextract_visible(visible)
+        except Exception:
+            pass
+
+    def select_output_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if directory:
+            self.output_directory = directory
+            self.out_dir_label.setText(self.output_directory)
+            self.statusBar().showMessage(f"Output directory set to: {directory}")
+            # Refresh available results when output dir changes
+            self._refresh_available_result_sets()
+
+    def _scan_and_update_main_dir(self, directory: str):
+        """
+        Scans a given directory for image files, updates the internal state and UI,
+        and loads an initial preview image. This is the central logic.
+        """
+        self.main_directory = directory
+        # Update line edit without triggering editingFinished
+        try:
+            self._suppress_dir_edit_handler = True
+            self.dir_label.setText(self.main_directory)
+            # Reset modified flag so first click doesn't fire editingFinished logic
+            try:
+                self.dir_label.setModified(False)
+            except Exception:
+                pass
+        finally:
+            self._suppress_dir_edit_handler = False
+        self.statusBar().showMessage("Scanning files...")
+
+        self.grouped_files = group_files(self.main_directory)
+        if not self.grouped_files:
+            QMessageBox.warning(self, "No Files Found", "Could not find any valid TIFF files in the selected directory.")
+            self.statusBar().showMessage("Ready.")
+            return
+
+        self.image_pair_list = []
+        for animal_data in self.grouped_files.values():
+            for time_data in animal_data.values():
+                if "WF" in time_data and "FL" in time_data:
+                    self.image_pair_list.append((time_data["WF"], time_data["FL"]))
+        self.image_pair_list.sort()
+
+        # Update phase sliders with time point count
+        if self.image_pair_list:
+            first_animal_key = next(iter(self.grouped_files.keys()))
+            num_time_points = len(self.grouped_files[first_animal_key])
+            self.feature_panel.update_phase_slider_range(num_time_points)
+
+        self.statusBar().showMessage(f"Found {len(self.grouped_files)} animals across {len(self.image_pair_list)} image pairs.")
+
+        # Load an initial random image immediately after scanning is complete (forced once).
+        self.load_random_preview_image(force=True)
+        # Refresh available result sets based on current output dir
+        self._refresh_available_result_sets()
