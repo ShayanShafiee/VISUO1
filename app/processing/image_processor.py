@@ -1,5 +1,24 @@
 # processing/image_processor.py
 
+
+"""Image processing helpers used by the preview and pipeline.
+
+Core utilities in this module include:
+- apply_lut: map a grayscale FL frame to RGB via a matplotlib colormap with a
+    configurable intensity window.
+- create_overlay: blend WF (grayscale) and FL (RGB) with a specified
+    transparency, normalizing input types robustly.
+- create_gradient_image / create_colorbar_image: small helpers to generate
+    gradients and labeled color bars for UI.
+- crop_image, add_timestamp_to_image, create_placeholder_image: primitives used
+    across collage building and previews.
+- create_animation_from_frames: emit a GIF for quick time-lapse inspection.
+- compute_animal_outline and draw_outline_on_image: outline extraction and
+    drawing tools for both preview overlays and saved outputs.
+
+Comments describe purpose and usage rather than change history.
+"""
+
 import numpy as np
 import os
 import cv2
@@ -52,7 +71,7 @@ def apply_lut(
     
     return rgb_image
 
-# --- FINAL CORRECTED create_overlay METHOD for processing/image_processor.py ---
+ 
 
 def create_overlay(
     wf_image: np.ndarray, 
@@ -442,7 +461,7 @@ def compute_animal_outline(
 def draw_outline_on_image(rgb_image: np.ndarray, contour: np.ndarray, color_rgb: Tuple[int, int, int], thickness: int = 3) -> np.ndarray:
     """
     Draw a single contour on an RGB image. The color should be in (R,G, B) order.
-    Returns a modified copy; original is not altered.
+    Returns a copy; original array is left unchanged.
     """
     if rgb_image is None or contour is None:
         return rgb_image

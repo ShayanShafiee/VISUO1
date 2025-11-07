@@ -1,3 +1,21 @@
+#!/usr/bin/env python3
+# gui/multi_roi_overlay.py
+
+"""Interactive multi-ROI overlay layer.
+
+Provides drawing, selecting, moving, resizing, and styling for multiple ROIs on
+top of the image preview viewport. Geometry is stored in image coordinates so
+ROIs remain consistent across zoom/pan operations. This widget mediates event
+handling and forwards non-ROI interactions (e.g., for cropping) when no active
+ROI consumes them.
+
+Key responsibilities:
+- Maintain ROI selection state and emit signals when geometry changes.
+- Render different ROI shapes (rect, ellipse, contour, text) with handles.
+- Support active ROI highlighting and color-coded display.
+
+Comment style documents behavior and rationale instead of change history.
+"""
 from typing import Optional
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRect, QPointF, pyqtSignal

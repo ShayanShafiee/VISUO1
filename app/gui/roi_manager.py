@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+# gui/roi_manager.py
+
+"""ROI data model and serialization helpers.
+
+Defines the in-memory representation of ROIs (shape, color, geometry, labels)
+and provides utilities to create, update, list, and serialize/deserialize ROIs
+for persistence. Used by both the preview overlay and the settings panel to keep
+lists and geometry in sync.
+
+Focus is on clear data handling; UI logic remains in overlay/panel modules.
+"""
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import List, Tuple, Optional, Literal

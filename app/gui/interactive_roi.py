@@ -1,4 +1,24 @@
-# gui/interactive_roi.py ---
+# gui/interactive_roi.py
+
+
+"""Interactive ROI overlay widget.
+
+This lightweight QWidget draws and edits a rectangular region of interest on
+top of the preview image. It supports:
+- Moving the ROI by dragging the interior or border
+- Resizing via eight handles (corners + edges)
+- Optional dimming outside the ROI
+
+Public API:
+- setActive(bool): toggles edit mode (handles and dashed border)
+- setOutsideOpacity(int): sets outside dimming (0–100)
+- setImageRect(QRect|None): image bounds in viewport coordinates
+- setRoi(QRect): programmatically set the ROI rectangle
+- roiChanged(QRect): signal emitted during live changes and on release
+
+The widget stays fully transparent outside of shaded regions so the preview
+underneath remains visible.
+"""
 
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal

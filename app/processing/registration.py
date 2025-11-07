@@ -1,5 +1,13 @@
 # processing/registration.py
 
+
+"""Registration helpers for template centering.
+
+Provides a utility to translate a WF/FL image pair so that the best template
+match is centered in the frame. The same translation is applied to both
+channels to preserve alignment.
+"""
+
 import cv2
 import numpy as np
 from typing import Tuple

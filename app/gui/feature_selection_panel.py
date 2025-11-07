@@ -1,12 +1,28 @@
-# gui/feature_selection_panel.py ---
+# gui/feature_selection_panel.py
+
+
+"""Feature selection panel.
+
+Provides UI controls for choosing radiomics features (grouped by category),
+selecting the spatial region for extraction (cropping window, entire image, or
+specific ROI), and configuring Signal Path Analysis thresholds and phase
+cutoffs. Emits signals whenever settings change so the main window can decide
+whether a re-extraction is required. Also exposes a small re-extract button
+that triggers a features-only workflow (future worker hookup).
+"""
 
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QFormLayout, 
                              QPushButton, QSpinBox, QCheckBox, 
-                             QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QHBoxLayout)
+                             QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QHBoxLayout,
+                             QComboBox, QLabel)
 from PyQt6.QtCore import Qt, pyqtSignal
 
 class FeatureSelectionPanel(QWidget):
+    # Emitted when any feature extraction setting changes (region, ROI, list)
+    featureSettingsChanged = pyqtSignal()
+    # Emitted when the small green play button is pressed to re-run extraction only
+    reExtractOnlyRequested = pyqtSignal()
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -44,17 +60,48 @@ class FeatureSelectionPanel(QWidget):
         feature_group = QGroupBox("Feature Extraction")
         feature_layout = QVBoxLayout(feature_group)
         
+        header_row = QHBoxLayout()
         self.feature_checkbox = QCheckBox("Enable Feature Extraction")
         self.feature_checkbox.toggled.connect(self.toggle_feature_widgets)
-        feature_layout.addWidget(self.feature_checkbox)
+        self.feature_checkbox.toggled.connect(self._emit_feature_changed)
+        header_row.addWidget(self.feature_checkbox)
+        header_row.addStretch(1)
+        # Small green play button for re-extract-only; hidden by default
+        self.reextract_btn = QPushButton("▶")
+        self.reextract_btn.setToolTip("Re-run feature extraction only (skip collage)")
+        self.reextract_btn.setFixedSize(28, 24)
+        try:
+            self.reextract_btn.setStyleSheet("QPushButton { background-color: #2e7d32; color: white; border: 1px solid #1b5e20; border-radius: 4px; } QPushButton:hover { background-color: #388e3c; }")
+        except Exception:
+            pass
+        self.reextract_btn.clicked.connect(self.reExtractOnlyRequested.emit)
+        self.reextract_btn.setVisible(False)
+        header_row.addWidget(self.reextract_btn)
+        feature_layout.addLayout(header_row)
         
         self.feature_widgets_container = QWidget()
         feature_form_layout = QFormLayout(self.feature_widgets_container)
         
-        self.feature_threshold_spinbox = QSpinBox()
-        self.feature_threshold_spinbox.setRange(0, 65535)
-        self.feature_threshold_spinbox.setValue(5000)
-        feature_form_layout.addRow("Signal Threshold:", self.feature_threshold_spinbox)
+        # Region selection for feature extraction
+        # Mode combo: Entire Image | Cropping Window | Specific ROI
+        self.feature_region_mode = QComboBox()
+        self.feature_region_mode.addItems(["Cropping Window", "Entire Image", "Specific ROI…"])
+        self.feature_region_mode.setToolTip("Choose the region used to compute radiomics features")
+        feature_form_layout.addRow("Feature Region:", self.feature_region_mode)
+
+        # ROI selector (enabled only when 'Specific ROI…' is chosen)
+        self.feature_roi_combo = QComboBox()
+        self.feature_roi_combo.setEnabled(False)
+        self.feature_roi_combo.setToolTip("Select one of the defined ROIs")
+        feature_form_layout.addRow("ROI:", self.feature_roi_combo)
+
+        # Enable/disable ROI list based on mode
+        def _toggle_roi_combo(idx:int):
+            text = self.feature_region_mode.itemText(idx).lower()
+            self.feature_roi_combo.setEnabled(text.startswith("specific"))
+        self.feature_region_mode.currentIndexChanged.connect(_toggle_roi_combo)
+        self.feature_region_mode.currentIndexChanged.connect(self._emit_feature_changed)
+        self.feature_roi_combo.currentIndexChanged.connect(self._emit_feature_changed)
         
         self.feature_tree = QTreeWidget()
         self.feature_tree.setHeaderHidden(True)
@@ -73,8 +120,9 @@ class FeatureSelectionPanel(QWidget):
                 feature_item.setCheckState(0, Qt.CheckState.Unchecked)
                 feature_item.setData(0, Qt.ItemDataRole.UserRole, internal_name)
         
-
         self.feature_tree.itemClicked.connect(self._on_item_clicked)
+        # also emit change when tree is clicked
+        self.feature_tree.itemClicked.connect(lambda *_: self._emit_feature_changed())
         
         feature_form_layout.addRow(self.feature_tree)
         feature_layout.addWidget(self.feature_widgets_container)
@@ -109,6 +157,7 @@ class FeatureSelectionPanel(QWidget):
         main_layout.addWidget(container_widget)
 
         self.path_checkbox.toggled.connect(self._toggle_path_widgets)
+        self.path_checkbox.toggled.connect(self._emit_feature_changed)
         
         # Manually call the function once to set the correct initial state.
         self._toggle_path_widgets(self.path_checkbox.isChecked())
@@ -126,6 +175,12 @@ class FeatureSelectionPanel(QWidget):
         self.path_threshold_spinbox.setEnabled(checked)
         self.phase1_spinbox.setEnabled(checked)
         self.phase2_spinbox.setEnabled(checked)
+
+    def _emit_feature_changed(self, *args, **kwargs):
+        try:
+            self.featureSettingsChanged.emit()
+        except Exception:
+            pass
 
     def get_settings(self) -> dict:
         """
@@ -154,10 +209,23 @@ class FeatureSelectionPanel(QWidget):
                 class_name = sample_feature.split('_')[1]
                 enabled_feature_classes.add(class_name)
 
+        # Region mode mapping for feature extraction
+        mode_text = self.feature_region_mode.currentText().lower()
+        if mode_text.startswith("entire"):
+            region_mode = "full"
+            region_roi_id = None
+        elif mode_text.startswith("specific"):
+            region_mode = "roi"
+            region_roi_id = self.feature_roi_combo.currentData()
+        else:
+            region_mode = "crop"
+            region_roi_id = None
+
         # 2. Combine all settings into a single dictionary
         all_settings = {
             "enable_features": self.feature_checkbox.isChecked(),
-            "feature_threshold": self.feature_threshold_spinbox.value(),
+            "feature_region_mode": region_mode,
+            "feature_region_roi_id": region_roi_id,
             "enabled_feature_classes": list(enabled_feature_classes),
             "selected_features_list": selected_features_list,
             "checked_pyradiomics_features": checked_pyradiomics_features,
@@ -177,7 +245,8 @@ class FeatureSelectionPanel(QWidget):
         """
         # --- 1. Block signals to prevent unintended triggers ---
         self.feature_checkbox.blockSignals(True)
-        self.feature_threshold_spinbox.blockSignals(True)
+        self.feature_region_mode.blockSignals(True)
+        self.feature_roi_combo.blockSignals(True)
         self.path_checkbox.blockSignals(True)
         self.path_threshold_spinbox.blockSignals(True)
         self.phase1_spinbox.blockSignals(True)
@@ -186,7 +255,23 @@ class FeatureSelectionPanel(QWidget):
 
         # --- 2. Set widget states using .get() for safety ---
         self.feature_checkbox.setChecked(data.get("enable_features", False))
-        self.feature_threshold_spinbox.setValue(data.get("feature_threshold", 5000))
+        # Restore region mode and selection
+        mode_key = str(data.get("feature_region_mode", "crop")).lower()
+        # Map key -> index
+        if mode_key in ("crop", "cropping", "roi_crop"):
+            self.feature_region_mode.setCurrentText("Cropping Window")
+        elif mode_key in ("full", "entire", "entire image"):
+            self.feature_region_mode.setCurrentText("Entire Image")
+        else:
+            self.feature_region_mode.setCurrentText("Specific ROI…")
+        # Try to select ROI by id label if present in combo
+        wanted_roi_id = data.get("feature_region_roi_id")
+        if wanted_roi_id is not None:
+            for i in range(self.feature_roi_combo.count()):
+                rid = self.feature_roi_combo.itemData(i)
+                if rid == wanted_roi_id:
+                    self.feature_roi_combo.setCurrentIndex(i)
+                    break
         
         self.path_checkbox.setChecked(data.get("enable_signal_path", False))
         self.path_threshold_spinbox.setValue(data.get("signal_path_threshold", 7500))
@@ -223,7 +308,8 @@ class FeatureSelectionPanel(QWidget):
 
         # --- 4. Unblock all signals ---
         self.feature_checkbox.blockSignals(False)
-        self.feature_threshold_spinbox.blockSignals(False)
+        self.feature_region_mode.blockSignals(False)
+        self.feature_roi_combo.blockSignals(False)
         self.path_checkbox.blockSignals(False)
         self.path_threshold_spinbox.blockSignals(False)
         self.phase1_spinbox.blockSignals(False)
@@ -322,9 +408,22 @@ class FeatureSelectionPanel(QWidget):
                 enabled_feature_classes.add(class_name)
         
         # Store the pyradiomics settings in a dictionary
+        # Region mode mapping
+        mode_text = self.feature_region_mode.currentText().lower()
+        if mode_text.startswith("entire"):
+            region_mode = "full"
+            region_roi_id = None
+        elif mode_text.startswith("specific"):
+            region_mode = "roi"
+            region_roi_id = self.feature_roi_combo.currentData()
+        else:
+            region_mode = "crop"
+            region_roi_id = None
+
         pyradiomics_settings = {
             "enable_features": self.feature_checkbox.isChecked(),
-            "feature_threshold": self.feature_threshold_spinbox.value(),
+            "feature_region_mode": region_mode,
+            "feature_region_roi_id": region_roi_id,
             "enabled_feature_classes": list(enabled_feature_classes),
             "selected_features_list": selected_features_list
         }
@@ -340,3 +439,35 @@ class FeatureSelectionPanel(QWidget):
         all_settings = {**pyradiomics_settings, **signal_path_settings}
         
         return all_settings
+
+    # Keep ROI list in sync so users can select ROIs for feature regions.
+    def update_available_rois(self, roi_summaries: list[dict]):
+        """Populate the ROI combo with current ROIs. Each entry stores its id as itemData."""
+        # Preserve currently selected id if possible
+        current_id = self.feature_roi_combo.currentData()
+        self.feature_roi_combo.blockSignals(True)
+        self.feature_roi_combo.clear()
+        if not roi_summaries:
+            self.feature_roi_combo.addItem("(No ROIs)", None)
+            self.feature_roi_combo.setEnabled(False)
+        else:
+            for r in roi_summaries:
+                # Format: Name [#id]
+                label = f"{r.get('name','ROI')} [#{r.get('id')}]"
+                self.feature_roi_combo.addItem(label, r.get('id'))
+            # Try to reselect previous
+            if current_id is not None:
+                for i in range(self.feature_roi_combo.count()):
+                    if self.feature_roi_combo.itemData(i) == current_id:
+                        self.feature_roi_combo.setCurrentIndex(i)
+                        break
+        # Enable state governed by mode
+        self.feature_roi_combo.setEnabled(self.feature_region_mode.currentText().lower().startswith("specific"))
+        self.feature_roi_combo.blockSignals(False)
+        # Any ROI list update may change the selected ROI used for features
+        self._emit_feature_changed()
+
+    # Expose a simple API for MainWindow to control the re-extract button visibility
+    def set_reextract_visible(self, visible: bool):
+        if hasattr(self, 'reextract_btn'):
+            self.reextract_btn.setVisible(bool(visible))

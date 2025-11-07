@@ -1,4 +1,39 @@
-# --- CORRECTED FILE: gui/settings_panel.py ---
+#!/usr/bin/env python3
+# gui/settings_panel.py
+
+"""Settings panel for visualization, registration, watermark, and ROIs.
+
+This module defines the right-side panel that controls how images are shown in
+the preview and how processing should behave. It intentionally separates
+configuration from execution: the panel emits signals when settings change and
+when actions are requested, while the MainWindow coordinates the work.
+
+Main groups and what they control:
+- Overlay Settings: FL transparency and LUT used to colorize the fluorescence
+    channel before composing with WF.
+- Intensity Range: min/max values to normalize FL into the colormap domain.
+- Registration: toggle, load a reference template thumbnail, and share the
+    template path with the MainWindow. When off, registration is disabled.
+- Timestamp Watermark: enable/disable and adjust size/color of bottom-left text.
+- Cropping Window: show/apply crop mask; ROI X/Y/W/H spinners are the canonical
+    crop rectangle used across the app.
+- Annotations (ROIs): list, selection, rename, color, visibility, property
+    dialogs (including Overlay and Composite ROIs).
+
+Key signals:
+- settingsChanged(): emitted on any visual/overlay/ROI setting change so the
+    preview can refresh.
+- roiChangedFromSpinners(QRect): when X/Y/W/H spinners change, emit the new
+    image-space rect for the PreviewPanel to map into its overlay.
+- start/pause/resume/abort/stopRequested(): control the processing worker.
+- templatePathChanged(str): share current registration template path.
+- ROI management signals: add/remove/rename/toggle/color/property changes.
+
+Notes:
+- Verbose logging is controlled via the application Settings menu; the flag is
+    exposed here so the MainWindow can persist it alongside other settings.
+- Comments describe intent and structure; change-log phrases are avoided.
+"""
 
 import os
 from typing import Optional

@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+# gui/outline_overlay.py
+
+"""Outline overlay widget.
+
+Draws an animal outline (largest contour) over the image preview without
+interfering with mouse interaction. Contour extraction is threshold-based with
+fallback heuristics (Otsu-based boost) when the initial threshold yields no
+result. Viewport mapping keeps the outline aligned during zoom/pan.
+
+No change-log commentary; comments explain purpose and steps.
+"""
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath
@@ -10,9 +22,11 @@ except Exception:
 
 
 class OutlineOverlay(QWidget):
-    """
-    Passive overlay that draws an animal outline derived from a thresholded image (WF or FL).
-    It never intercepts mouse events and tracks the zoom/pan via mapping image points to viewport coordinates.
+    """Passive animal outline overlay.
+
+    Computes a contour in image coordinates, caches it, and builds a QPainterPath
+    mapped to viewport coordinates so the outline tracks zoom/pan smoothly.
+    Mouse events pass through to underlying widgets.
     """
     def __init__(self, parent=None, image_view=None):
         super().__init__(parent)

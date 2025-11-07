@@ -1,4 +1,40 @@
-# --- CORRECTED FILE: gui/preview_panel.py ---
+# gui/preview_panel.py
+
+
+"""Preview panel and overlay/ROI tools.
+
+This module provides the interactive image preview used in the left column of
+the application. It focuses on three core responsibilities:
+
+- Display: show a WF/FL image pair in a zoomable, pannable view while keeping
+    the window layout stable (no resize jumps). A compact, live colorbar displays
+    the current LUT/intensity window used for the FL channel.
+- Annotation: support multiple ROI types (rect/circle/contour/text) with
+    selection, rename, color, visibility, and composition (union/intersection/
+    subtract/xor). ROI geometry is tracked in image-space so it maps cleanly as
+    you zoom and pan.
+- Overlays: draw a bottom-left, left-aligned timestamp box in screen space and
+    a top registration bar (when registration is enabled). These overlays stay at
+    fixed on-screen locations regardless of zoom/pan.
+
+Key classes:
+- ZoomableImageView: QGraphicsView wrapper that preserves a consistent base-fit
+    scale and smooth, bounded zoom. It exposes helpers to zoom to a scene rect
+    (e.g., fit-to-crop).
+- PreviewPanel: main widget wiring the image view, colorbar, navigation buttons,
+    ROI overlays, and overlays for timestamp/registration. It emits signals for
+    image navigation and ROI updates so the MainWindow can keep the settings panel
+    and processing pipeline in sync.
+
+Signals emitted by PreviewPanel:
+- requestNewRandomImage, requestPreviousImage, requestNextImage, requestSpecificImage
+- roiChangedFromDrawing(QRect): new image-space ROI from the crop overlay
+- roiListUpdated(list[dict]): summaries for the settings panel list
+- activeRoiChanged(int): ROI id selected in the overlay (-1 to deselect)
+
+Note: This file intentionally avoids change-log phrasing in comments.
+Comments describe behavior and rationale for maintainability.
+"""
 
 import os
 import re
@@ -972,8 +1008,8 @@ class PreviewPanel(QWidget):
         self._update_timestamp_overlay()
 
     def _layout_top_overlays(self):
-        """Layout overlays so registration spans the full top width and timestamp sits at bottom-right.
-        This maximizes horizontal space for Δx/Δy/θ and eliminates clipping.
+        """Layout overlays so registration spans the full top width and timestamp sits at bottom-left
+        (left-aligned along the left edge of the preview panel), per UI request.
         """
         try:
             if not hasattr(self, 'image_view') or not hasattr(self, 'timestamp_overlay'):
@@ -987,10 +1023,26 @@ class PreviewPanel(QWidget):
             # Full-width registration bar at the very top
             if hasattr(self, 'registration_overlay'):
                 self.registration_overlay.setGeometry(QRect(vp.x(), vp.y(), vw, bar_h))
-            # Timestamp box anchored to bottom-right
-            ts_h = 32
-            ts_w = min(max(160, int(round(vw * 0.24))), vw)  # responsive width with sensible min
-            ts_x = vp.x() + vw - ts_w - gap
+            # Timestamp box anchored to bottom-left
+            from PyQt6.QtGui import QFontMetrics
+            try:
+                fm = QFontMetrics(self.timestamp_overlay.font())
+            except Exception:
+                fm = None
+            # Determine dynamic width/height based on text and padding
+            text = getattr(self, '_timestamp_text', '') or ''
+            padding = getattr(self.timestamp_overlay, '_padding', 6)
+            # Height: font height + vertical padding
+            if fm is not None:
+                ts_h = max(20, fm.height() + 2 * padding)
+                content_w = fm.horizontalAdvance(text) + 2 * padding
+            else:
+                ts_h = 32
+                content_w = max(160, int(round(vw * 0.24)))
+            # Width: expand to fit text, but clamp to available viewport width minus margins
+            max_w = max(0, vw - 2 * gap)
+            ts_w = min(max(160, content_w), max_w)
+            ts_x = vp.x() + gap
             ts_y = vp.y() + vp.height() - ts_h - gap
             self.timestamp_overlay.setGeometry(QRect(ts_x, ts_y, ts_w, ts_h))
             # Keep them on top
@@ -1943,7 +1995,10 @@ class PreviewPanel(QWidget):
 
     # --- Helpers ---
     def _derive_timestamp_text(self, wf_path: Optional[str], fl_path: Optional[str]) -> str:
-        """Use the same time point extracted for collages: parse filename and render 'X min'."""
+        """Derive preview overlay text formatted like the filename tokens:
+        'Group-Sex-Dose-Treatment-time'. Time is shown as '<minutes>min'.
+        Falls back to just '<minutes>min' if group fields cannot be parsed.
+        """
         try:
             from processing.file_handler import parse_filename
         except Exception:
@@ -1952,8 +2007,29 @@ class PreviewPanel(QWidget):
         for pth in candidates:
             try:
                 parsed = parse_filename(pth) if parse_filename else None
-                if parsed and 'time' in parsed:
-                    return f"{int(parsed['time'])} min"
+                if not parsed:
+                    continue
+                time_str = None
+                try:
+                    time_val = int(parsed.get('time', '0'))
+                    time_str = f"{time_val}min"
+                except Exception:
+                    time_str = None
+                # Parse animal_id like 'G11-F-12Gy-SHOV-A01' → ['G11','F','12Gy','SHOV','A01']
+                group_parts = []
+                try:
+                    animal_id = str(parsed.get('animal_id', ''))
+                    if animal_id:
+                        parts = animal_id.split('-')
+                        if len(parts) >= 4:
+                            group_parts = [parts[0], parts[1], parts[2], parts[3]]
+                except Exception:
+                    group_parts = []
+                # Build final text with hyphen-separated tokens matching filename style
+                if time_str and group_parts:
+                    return "-".join(group_parts + [time_str])
+                if time_str:
+                    return time_str
             except Exception:
                 continue
         return ""

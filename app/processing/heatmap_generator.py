@@ -1,4 +1,21 @@
-# processing/heatmap_generator.py ---
+# processing/heatmap_generator.py
+
+
+"""DTW clustering heatmap generation utilities.
+
+Converts a group summary feature CSV into per-feature time-series matrices,
+computes Dynamic Time Warping (DTW) distance matrices (univariate and averaged
+multivariate), and saves clustered heatmaps with hierarchical ordering.
+
+Key functions:
+ - create_summary_curves(df, agg_method): pivot group-level feature curves
+ - calculate_univariate_dtw_matrix(feature_df): distance matrix for one feature
+ - calculate_multivariate_dtw_matrix(summary_curves): aggregated distance matrix
+ - generate_clustered_heatmap(distance_df, title, output_path): render & save
+
+The DTW distances are z-score scaled per feature (min-max scaling) before
+averaging for multivariate clustering to balance differing dynamic ranges.
+"""
 
 import pandas as pd
 import numpy as np
@@ -9,7 +26,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import os
 
-# --- THIS IS THE CORRECTLY NAMED FUNCTION THAT WAS MISSING ---
+ # Construct summary curves for each feature based on chosen aggregation
 def create_summary_curves(summary_df: pd.DataFrame, agg_method: str = 'median') -> dict:
     """
     Parses the summary DataFrame to create a dictionary of summary (mean or median)
@@ -49,7 +66,7 @@ def create_summary_curves(summary_df: pd.DataFrame, agg_method: str = 'median') 
         summary_curves[feature_name] = pivoted
         
     return summary_curves
-# --- END CORRECTLY NAMED FUNCTION ---
+ # End summary curve construction helper
 
 def calculate_univariate_dtw_matrix(feature_df: pd.DataFrame) -> pd.DataFrame:
     """Calculates the DTW distance matrix for a single feature's time-series curves."""

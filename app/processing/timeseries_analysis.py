@@ -1,5 +1,16 @@
 # processing/timeseries_analysis.py
 
+
+"""Time-series analysis for feature ranking and clustering.
+
+Calculates group-aggregated (median/mean) curves, ranks features by DTW-based
+separation, and supports permutation tests for stability. Also provides helper
+utilities for clustering and visualization of time-series behavior.
+
+Comment style here focuses on what and why, not change history.
+"""
+# processing/timeseries_analysis.py
+
 import pandas as pd
 import numpy as np
 import warnings
@@ -132,8 +143,7 @@ def run_dtw_ranking(median_curves: dict) -> dict:
             curve1 = df[group1].values
             curve2 = df[group2].values
             
-            # --- THIS IS THE CRITICAL FIX FOR THE DTW ERROR ---
-            # Check for zero standard deviation before normalizing
+            # Normalize safely: if a series is flat (std=0), only mean-center it (avoid divide-by-zero).
             std1 = np.std(curve1)
             std2 = np.std(curve2)
             
@@ -147,7 +157,7 @@ def run_dtw_ranking(median_curves: dict) -> dict:
                 curve2_norm = (curve2 - np.mean(curve2)) / std2
             else:
                 curve2_norm = curve2 - np.mean(curve2)
-            # --- END FIX ---
+            # End safe normalization branch
             
             try:
                 alignment = dtw(curve1_norm, curve2_norm, keep_internals=False)
@@ -185,7 +195,7 @@ def run_permutation_ranking(raw_df: pd.DataFrame, median_curves: Dict[str, pd.Da
 
             # 2. Calculate the observed test statistic: the average distance *within* groups
             # In our case, since we have one curve per group, this is always 0.
-            # So, we'll use a modified statistic: the average distance *between* all pairs.
+            # Use an adjusted statistic: the average distance between all pairs.
             observed_statistic = np.mean(dist_matrix)
 
             # 3. Run permutations
@@ -248,8 +258,10 @@ def _rank_by_interaction_effect(
             raw_df[factor2_col].isin(factor2_levels)
         ].copy()
 
-        # 2. Before running the model, explicitly drop any rows that have missing data
-        #    in the specific columns we are about to use. This prevents the length mismatch.
+        # 2. Coerce numeric columns and drop missing values only for the model columns
+        #    Ensures the response and time columns are numeric
+        subset_df[feature] = pd.to_numeric(subset_df[feature], errors='coerce')
+        subset_df['time_min'] = pd.to_numeric(subset_df['time_min'], errors='coerce')
         columns_in_model = [feature, 'time_min', factor1_col, factor2_col, 'animal_key']
         subset_df.dropna(subset=columns_in_model, inplace=True)
 
@@ -297,8 +309,12 @@ def _rank_by_normalization_effect(
 ) -> float:
     """Helper function to calculate the normalization score for one feature using DTW."""
     try:
+        # Ensure the feature column is numeric
+        df = raw_df.copy()
+        df[feature] = pd.to_numeric(df[feature], errors='coerce')
+        df['time_min'] = pd.to_numeric(df['time_min'], errors='coerce')
         # Create a pivot table of individual animal curves for the selected feature
-        curves_df = raw_df.pivot_table(index='time_min', columns='animal_key', values=feature)
+        curves_df = df.pivot_table(index='time_min', columns='animal_key', values=feature)
 
         # Get the animal keys for each of the three groups
         baseline_keys = raw_df[raw_df['group_name'] == baseline_group]['animal_key'].unique()
@@ -373,9 +389,15 @@ def rank_features_for_hypothesis(raw_df: pd.DataFrame, params: Dict) -> pd.DataF
     """
     hypothesis_type = params.get("type")
     
-    # Identify feature columns
+    # Identify numeric feature columns only (exclude known identifiers/labels)
     non_feature_cols = ['group_name', 'Group_Number', 'Sex', 'Dose', 'Treatment', 'animal_key', 'time_min']
-    feature_cols = [col for col in raw_df.columns if col not in non_feature_cols]
+    candidate_cols = [col for col in raw_df.columns if col not in non_feature_cols]
+    feature_cols = []
+    for col in candidate_cols:
+        # Consider a column a feature if it can be coerced to numeric with at least some non-NaN values
+        coerced = pd.to_numeric(raw_df[col], errors='coerce')
+        if coerced.notna().sum() >= 2:
+            feature_cols.append(col)
 
     results = {}
 
@@ -409,60 +431,4 @@ def rank_features_for_hypothesis(raw_df: pd.DataFrame, params: Dict) -> pd.DataF
     results_df = results_df.sort_values(by=col_name, ascending=ascending)
     
     return results_df.round(4)
-    """
-    Main orchestrator for ALL feature ranking.
-    """
-    hypothesis_type = params.get("type")
-    
-    if hypothesis_type == "Overall":
-        # --- NEW: Handle the unsupervised ranking case ---
-        summary_data = summarize_features_by_group(raw_df.copy())
-        median_curves = create_median_curves_for_analysis(summary_data)
-        dtw_results = run_dtw_ranking(median_curves)
-        stable_score_results = run_stable_distance_ranking(median_curves)
-        results_df = pd.DataFrame({
-            'DTW Score (Separation)': pd.Series(dtw_results),
-            'Clustering Score (Stability)': pd.Series(stable_score_results)
-        }).reset_index().rename(columns={'index': 'Feature'})
-        return results_df.sort_values(by='Clustering Score (Stability)', ascending=False).fillna(0).round(4)
-    """
-    Main orchestrator for hypothesis-driven feature ranking.
-    """
-    hypothesis_type = params.get("type")
-    
-    # Identify feature columns
-    non_feature_cols = ['group_name', 'Group_Number', 'Sex', 'Dose', 'Treatment', 'animal_key', 'time_min']
-    feature_cols = [col for col in raw_df.columns if col not in non_feature_cols]
-
-    results = {}
-
-    for feature in feature_cols:
-        if hypothesis_type == "Interaction":
-            score = _rank_by_interaction_effect(
-                raw_df, feature,
-                params["factor1_col"], params["factor1_levels"],
-                params["factor2_col"], params["factor2_levels"]
-            )
-            results[feature] = score
-        elif hypothesis_type == "Normalization":
-            score = _rank_by_normalization_effect(
-                raw_df, feature,
-                params["baseline_group"], params["affected_group"], params["treated_group"]
-            )
-            results[feature] = score
-
-    if not results:
-        return pd.DataFrame()
-
-    # Create and sort the final results table
-    if hypothesis_type == "Interaction":
-        col_name = "Interaction p-value (Lower is Better)"
-        ascending = True
-    else: # Normalization
-        col_name = "Normalization Score (Higher is Better)"
-        ascending = False
-        
-    results_df = pd.DataFrame(results.items(), columns=['Feature', col_name])
-    results_df = results_df.sort_values(by=col_name, ascending=ascending)
-    
-    return results_df.round(4)
+    # Remove duplicated legacy blocks below (kept earlier in the file)

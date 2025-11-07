@@ -1,4 +1,16 @@
-# --- NEW FILE: processing/feature_extraction.py ---
+# processing/_feature_extraction.py
+
+
+"""Legacy simple feature extraction helpers.
+
+This module provides a lightweight alternative set of feature calculations for
+fluorescence images when full pyradiomics extraction is not required. It
+derives intensity, shape, histogram, and basic texture (GLCM) features from a
+threshold-defined signal mask.
+
+Intended usage: internal fallback or experimental feature sets. The main
+pipeline currently uses `processing.feature_extraction.calculate_pyradiomics_features`.
+"""
 
 import numpy as np
 from scipy.stats import kurtosis, skew

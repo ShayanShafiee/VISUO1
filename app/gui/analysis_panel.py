@@ -1,4 +1,30 @@
-# --- FINAL CORRECTED FILE: gui/analysis_panel.py ---
+#!/usr/bin/env python3
+# gui/analysis_panel.py
+
+"""Analysis panel for feature ranking and heatmaps.
+
+This module provides controls to run analyses on the loaded feature CSVs and
+visualize results. It does not perform heavy computations directly; instead, it
+emits high-level signals that worker threads (owned by MainWindow) consume.
+
+Capabilities:
+- Load Data: choose a Raw or Summary CSV and list available "result sets" from
+    the output directory to quickly switch inputs for analysis.
+- Feature Ranking: run overall ranking or hypothesis-driven variants (e.g.,
+    interaction or normalization) and show a sortable table with export/copy.
+- Heatmaps: generate univariate heatmaps per feature and a multivariate DTW
+    heatmap; choose median/mean aggregation and whether to show plots.
+
+Signals emitted:
+- runRankingAnalysis(dict): parameters describing selected ranking analysis.
+- runUnivariateHeatmaps(path, show_plots, agg): trigger univariate heatmaps.
+- runMultivariateHeatmap(path, show_plots, agg): trigger multivariate heatmap.
+- loadDataRequest(): ask MainWindow to open a file dialog to choose a CSV.
+- useResultSetRequested(path): request using a detected Raw Results CSV.
+
+Implementation note: Comments explain UI logic and data flow. We avoid change-
+log phrasing to keep comments instructional rather than historical.
+"""
 
 import os
 import re
@@ -14,6 +40,7 @@ class AnalysisPanel(QWidget):
     runUnivariateHeatmaps = pyqtSignal(str, bool, str)
     runMultivariateHeatmap = pyqtSignal(str, bool, str)
     loadDataRequest = pyqtSignal() 
+    useResultSetRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +62,18 @@ class AnalysisPanel(QWidget):
         self.loaded_file_label.setWordWrap(True)
         load_layout.addWidget(self.load_data_button)
         load_layout.addWidget(self.loaded_file_label)
+        # Available result sets dropdown
+        result_row = QHBoxLayout()
+        self.result_set_combo = QComboBox()
+        self.result_set_combo.setToolTip("Select among available Raw Results files in the output directory")
+        self.use_result_button = QPushButton("Use")
+        self.use_result_button.setToolTip("Load the selected result set for ranking and heatmaps")
+        self.use_result_button.setFixedWidth(60)
+        self.use_result_button.clicked.connect(self._emit_use_selected_result)
+        result_row.addWidget(QLabel("Result Set:"))
+        result_row.addWidget(self.result_set_combo, 1)
+        result_row.addWidget(self.use_result_button)
+        load_layout.addLayout(result_row)
         main_layout.addWidget(load_group)
 
         ranking_group = QGroupBox("Feature Ranking")
@@ -116,6 +155,21 @@ class AnalysisPanel(QWidget):
         self.enable_buttons(raw_csv_ready=False, summary_csv_ready=False)
         self._on_analysis_type_changed(0)
 
+    def _emit_use_selected_result(self):
+        path = self.result_set_combo.currentData()
+        if isinstance(path, str) and path:
+            self.useResultSetRequested.emit(path)
+
+    def update_available_result_sets(self, paths: list[str]):
+        """Populate the result-set dropdown with available Raw Results CSVs."""
+        try:
+            self.result_set_combo.blockSignals(True)
+            self.result_set_combo.clear()
+            for p in sorted(paths):
+                self.result_set_combo.addItem(os.path.basename(p), p)
+        finally:
+            self.result_set_combo.blockSignals(False)
+
     def get_settings(self) -> dict:
         """Gets the current state of the analysis panel widgets."""
         return {
@@ -192,8 +246,8 @@ class AnalysisPanel(QWidget):
             
         clipboard.setText(table_text)
         
-        # --- NEW: Show a confirmation message in the main window's status bar ---
-        # self.window() gets a reference to the MainWindow that contains this panel.
+        # Provide lightweight feedback via the main window's status bar
+        # (self.window() returns the containing MainWindow instance).
         if self.window() and hasattr(self.window(), 'statusBar'):
             self.window().statusBar().showMessage("Results copied to clipboard.", 3000) # Message disappears after 3 seconds
 
@@ -339,3 +393,54 @@ class AnalysisPanel(QWidget):
         
         # 6. Make columns resize to fit their content
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+        # 7. Apply informative tooltips to header items (hover-help for scores)
+        self._apply_score_header_tooltips()
+
+    def _apply_score_header_tooltips(self):
+        """Adds hover tooltips to results table headers explaining each score and directionality."""
+        # Centralized help text map for known columns
+        help_map = {
+            'Feature': (
+                'Feature name (radiomics/statistics identifier).'
+            ),
+            'DTW Score (Separation)': (
+                'Average Dynamic Time Warping distance between group median curves.\n'
+                'Higher = better separation between groups (arbitrary distance units).'
+            ),
+            'Clustering Score (Stability)': (
+                'Standard deviation of pairwise DTW distances among group curves.\n'
+                'Higher = stronger, more stable separation across groups.'
+            ),
+            'Interaction p-value (Lower is Better)': (
+                'P-value from a linear mixed-effects model testing a time × factor interaction.\n'
+                'Lower = stronger evidence of interaction (better).'
+            ),
+            'Normalization Score (Higher is Better)': (
+                'Ratio of DTW distances: affected→baseline divided by treated→baseline.\n'
+                'Higher = treated curves closer to baseline relative to affected (better).'
+            ),
+        }
+
+        # Heuristic fallbacks based on common phrases
+        def fallback_help(header_text: str) -> str:
+            text_lower = header_text.lower()
+            if 'p-value' in text_lower:
+                return 'P-value of a statistical test. Lower = more significant (better).'
+            if 'higher is better' in text_lower:
+                return 'Higher values indicate better performance.'
+            if 'lower is better' in text_lower:
+                return 'Lower values indicate better performance.'
+            if 'dtw' in text_lower:
+                return 'Dynamic Time Warping-based score of group separation.'
+            return ''
+
+        # Apply tooltips to each header currently visible
+        for col_idx in range(self.results_table.columnCount()):
+            item = self.results_table.horizontalHeaderItem(col_idx)
+            if not item:
+                continue
+            header_text = item.text()
+            tooltip = help_map.get(header_text) or fallback_help(header_text)
+            if tooltip:
+                item.setToolTip(tooltip)

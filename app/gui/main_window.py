@@ -1,4 +1,37 @@
-# --- CORRECTED FILE: gui/main_window.py ---
+# gui/main_window.py
+
+
+"""Main application window for VISUO1.
+
+This module assembles and coordinates the user interface components:
+SettingsPanel, PreviewPanel, FeatureSelectionPanel, and AnalysisPanel. It:
+ - Scans a chosen data directory for WF/FL TIFF image pairs and groups them by animal/time.
+ - Maintains a flat list of image pairs for quick preview navigation.
+ - Renders live composite overlays (WF + LUT-colored FL) including optional registration info and animal outline.
+ - Collects user configuration (intensity normalization, transparency, ROI, registration template).
+ - Launches background QThreads for long-running work: batch processing (collages, feature extraction, signal path analysis), ranking, and heatmaps.
+ - Persists and restores settings including ROI definitions and verbose logging state.
+ - Provides status/progress feedback and distinct outcome messages (success, error, aborted, stopped).
+
+Design notes:
+ - Heavy image I/O and feature extraction are isolated in Worker classes moved to QThreads to keep the GUI responsive.
+ - The preview cache minimizes disk reads when tweaking visualization parameters.
+ - Feature extraction signature (selected classes/region) is tracked so the UI can prompt for re-extraction when settings change.
+ - Heatmap and ranking tasks run independently, each with its own worker/thread lifecycle.
+
+Key attributes:
+ grouped_files: dict[str, dict[str, dict[str,str]]]   # animal_key -> time_point -> {'WF': path, 'FL': path}
+ image_pair_list: list[tuple[str,str]]                # flattened WF/FL pairs for preview cycling
+ current_preview_index: int                           # index into image_pair_list
+ template_image: np.ndarray | None                    # loaded registration template if enabled
+
+Threads & workers:
+ worker_thread / worker            – batch processing
+ ranking_thread / RankingWorker    – feature ranking / hypothesis testing
+ heatmap_thread / HeatmapWorker    – DTW-based clustering heatmaps
+
+Signals from workers feed statusBar, progress bar, and completion handlers for user feedback.
+"""
 
 import os
 import sys
@@ -154,7 +187,7 @@ class MainWindow(QMainWindow):
         self._suppress_dir_edit_handler = False
         self._suppress_out_dir_edit_handler = False
 
-        # --- New: Feature extraction signature tracking ---
+    # Track feature extraction signature to detect when re-extraction is needed
         self._last_feature_signature = None  # Tuple describing last processed feature config
         self._current_run_feature_signature = None
 
@@ -707,7 +740,7 @@ class MainWindow(QMainWindow):
 
     def _on_main_dir_edited(self):
         """Handles manual edits to the main directory path."""
-        # Ignore programmatic updates or non-modified focus losses
+    # Ignore programmatic updates or focus losses that didn't change text
         if getattr(self, '_suppress_dir_edit_handler', False):
             return
         try:
@@ -717,9 +750,8 @@ class MainWindow(QMainWindow):
             pass
         path = self.dir_label.text()
         if os.path.isdir(path):
-            # --- MODIFIED: Call the new helper function ---
+            # Delegate to central scan logic for consistency (no change-log markers)
             self._scan_and_update_main_dir(path)
-            # --- END MODIFICATION ---
         elif path != self.main_directory: # Only show warning if text actually changed to something invalid
             QMessageBox.warning(self, "Invalid Path", "The entered main directory path does not exist.")
             try:
@@ -743,6 +775,7 @@ class MainWindow(QMainWindow):
             pass
         path = self.out_dir_label.text()
         if os.path.isdir(path):
+            # Accept new output directory and notify user in status bar
             self.output_directory = path
             self.statusBar().showMessage(f"Output directory set to: {path}")
         elif path != self.output_directory:
@@ -953,9 +986,9 @@ class MainWindow(QMainWindow):
             h, w, ch = overlay_image.shape
             q_image = QImage(overlay_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
             
-            # --- MODIFIED: Pass the 'settings' dictionary to the preview panel ---
+            # Provide settings snapshot so preview can render overlays consistently
             self.preview_panel.update_preview(QPixmap.fromImage(q_image.copy()), settings)
-            # --- END MODIFICATION ---
+            # End preview update
 
         except Exception as e:
             self.statusBar().showMessage(f"Error updating preview: {e}")
@@ -1426,7 +1459,7 @@ class MainWindow(QMainWindow):
 
     def _on_main_dir_edited(self):
         """Handles manual edits to the main directory path."""
-        # Ignore programmatic updates or non-modified focus losses
+    # Ignore programmatic updates or focus losses that didn't change text
         if getattr(self, '_suppress_dir_edit_handler', False):
             return
         try:
@@ -1436,9 +1469,8 @@ class MainWindow(QMainWindow):
             pass
         path = self.dir_label.text()
         if os.path.isdir(path):
-            # --- MODIFIED: Call the new helper function ---
+            # Delegate to central scan logic for consistency
             self._scan_and_update_main_dir(path)
-            # --- END MODIFICATION ---
         elif path != self.main_directory: # Only show warning if text actually changed to something invalid
             QMessageBox.warning(self, "Invalid Path", "The entered main directory path does not exist.")
             try:
@@ -1673,9 +1705,9 @@ class MainWindow(QMainWindow):
             h, w, ch = overlay_image.shape
             q_image = QImage(overlay_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
             
-            # --- MODIFIED: Pass the 'settings' dictionary to the preview panel ---
+            # Provide settings snapshot so preview can render overlays consistently
             self.preview_panel.update_preview(QPixmap.fromImage(q_image.copy()), settings)
-            # --- END MODIFICATION ---
+            # End preview update
 
         except Exception as e:
             self.statusBar().showMessage(f"Error updating preview: {e}")
@@ -2097,7 +2129,7 @@ class MainWindow(QMainWindow):
 
         self.analysis_panel.setEnabled(False)
         self.heatmap_thread = QThread()
-        # --- MODIFIED: Pass agg_method to the worker's constructor ---
+    # HeatmapWorker receives aggregation method (e.g., mean/median) to choose summary columns
         self.heatmap_worker = HeatmapWorker(mode, self.summary_csv_path, show_plot, agg_method)
         self.heatmap_worker.moveToThread(self.heatmap_thread)
         

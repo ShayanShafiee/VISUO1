@@ -1,4 +1,20 @@
-# --- main.py ---
+# app/main.py
+
+
+"""Application entry point.
+
+Responsibilities:
+1. Enforce a single running instance via a PID lock file (with user choice to restart or cancel).
+2. Initialize QApplication, optional splash screen, window icon, and resource paths.
+3. Construct and show the MainWindow and begin the Qt event loop.
+
+Design highlights:
+- Lock file lives in system temp directory; stale locks are ignored.
+- If an instance is running, user can terminate it from a dialog (helpful when a hidden window remains).
+- Uses a helper to generate a rounded icon from a square PNG for a polished appearance.
+
+Comment style avoids change-log wording; focus stays on purpose and flow.
+"""
 
 import sys
 import os
@@ -87,7 +103,7 @@ if __name__ == '__main__':
     # This is essential for the QMessageBox to work.
     app = QApplication(sys.argv)
 
-    # New single-instance workflow ---
+    # Single-instance guard: ask user if an earlier instance should be closed.
     if not check_for_previous_instance():
         # User cancelled, so exit cleanly.
         sys.exit(0)

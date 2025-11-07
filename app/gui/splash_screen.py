@@ -1,4 +1,24 @@
-# --- gui/splash_screen.py ---
+# gui/splash_screen.py
+
+
+"""Splash screen video player.
+
+Shows a frameless, centered video (muted) while the main window initializes.
+Transitions automatically to the application on:
+ - End of media
+ - Explicit error / invalid media
+ - Fallback timeout (stalled backend)
+
+Usage:
+    splash = SplashScreen(path_to_mp4)
+    splash.show(); splash.play_animation()
+    # Later, once MainWindow is constructed:
+    splash.set_main_window(main_window)
+
+If initialization finishes after the video ends, the transition happens as
+soon as the main window is marked ready. Defensive fallbacks ensure the user
+is never left with a stuck splash screen.
+"""
 
 from PyQt6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput

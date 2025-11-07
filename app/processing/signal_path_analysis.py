@@ -1,4 +1,28 @@
-# --- COMPLETE AND CORRECTED FILE: processing/signal_path_analysis.py ---
+# processing/signal_path_analysis.py
+
+
+"""Signal path / spatiotemporal analysis utilities.
+
+Provides registration across a time series and generation of composite
+spatiotemporal visualizations (temporal color progression, phase map, contour
+evolution) plus basic morphology metrics of activation footprints.
+
+High-level functions:
+- register_animal_time_series: Aligns each time point to the first via ECC
+    (Euclidean motion). Returns aligned WF/FL arrays for downstream analysis.
+- analyze_signal_path: Builds masks above a fluorescence threshold, derives
+    temporal / phase / contour overlays with color bars, and computes footprint
+    metrics (area, circularity, dispersion).
+
+Design notes:
+- Threshold boosting (Otsu * 1.10) tightens background segmentation for a more
+    precise outline overlay without relying on user tuning here.
+- All color bar creation is delegated to helpers in image_processor for reuse.
+- Returns are structured so the caller can optionally persist individual maps
+    or aggregate metrics alongside feature CSVs.
+
+Comments emphasize rationale and data flow; change-log phrasing removed.
+"""
 
 import cv2
 import numpy as np
@@ -73,7 +97,7 @@ def analyze_signal_path(
     transparency_percent: int,
     phase1_index: int,
     phase2_index: int,
-    time_points_in_minutes: List[int], # NEW argument
+    time_points_in_minutes: List[int], # UI-provided time points (minutes) for labeling color bars
     cmap_name: str = 'inferno'
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, float]]:
     """

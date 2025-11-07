@@ -1,5 +1,30 @@
 # processing/file_handler.py
 
+
+"""File discovery and grouping helpers.
+
+Parses TIFF filenames to extract metadata (date, animal id, time point, image
+type) and constructs nested dictionaries for fast access by animal/time. The
+regex-based parser is resilient to additional dashes or tokens between
+expected segments by using non-greedy matches.
+
+Primary utilities:
+ - parse_filename(path): returns structured components or None if pattern fails
+ - group_files(root_dir): walks directory tree and groups WF/FL pairs
+ - get_random_image_pair(grouped): selects a random valid pair for preview
+
+Returned data shape from group_files:
+        {
+            "DATE_ANIMALID": {
+                    "TIME": {"WF": wf_path, "FL": fl_path},
+                    ...
+            },
+            ...
+        }
+
+All time strings are zero‑padded for consistent sorting (e.g., "30" -> "0030").
+"""
+
 import os
 import re
 from collections import defaultdict
