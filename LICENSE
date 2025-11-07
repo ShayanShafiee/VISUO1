@@ -1,0 +1,53 @@
+VISUO1 Non‑Commercial Research License (NCRL) v1.0
+Copyright (c) 2023–2025, Shayan Shafiee and VISUO1 contributors
+
+1. Definitions
+   1.1 "Software" means the VISUO1 project and all associated source code, assets, and documentation distributed in this repository.
+   1.2 "You" (or "Your") means an individual or Legal Entity exercising permissions granted by this License.
+   1.3 "Academic and Research Purposes" means teaching, learning, academic coursework, thesis/dissertation work, non‑profit research, and scholarly publication activities conducted by academic or non‑profit institutions.
+   1.4 "Non‑Commercial" means not intended for or directed toward commercial advantage or monetary compensation, including (without limitation) paid consulting, contract work, fee‑based services (SaaS), internal use at a for‑profit company beyond evaluation, or distribution in a paid product.
+   1.5 "Derivative Work" means any work that is based on or incorporates the Software, including any modifications or additions.
+
+2. Grant of Rights (Non‑Commercial Only)
+   Subject to the terms and conditions of this License, You are hereby granted a worldwide, royalty‑free, non‑exclusive, non‑transferable license to:
+   (a) use, reproduce, and modify the Software; and
+   (b) distribute the Software and Derivative Works;
+   solely for Academic and Research Purposes and strictly for Non‑Commercial use.
+
+3. Share‑Alike and Source Availability
+   3.1 Any distribution, public deployment, or public hosting of the Software or a Derivative Work must:
+       (i) be licensed under this same License (NCRL) or a later version of it released by the copyright holder; and
+       (ii) include prominent notices of all changes You made; and
+       (iii) provide complete corresponding source code of the Derivative Work, at no charge, via a publicly accessible repository or download link.
+   3.2 You must retain all copyright, license, and attribution notices in all copies of the Software and Derivative Works.
+
+4. Prohibited Commercial Use
+   4.1 You may not use the Software or Derivative Works, in whole or in part, for Commercial purposes.
+   4.2 Without limiting the foregoing, You may not:
+       (a) sell, license, or otherwise commercially distribute the Software or Derivative Works;
+       (b) use the Software or Derivative Works to provide paid services (including SaaS, hosted services, or fee‑based analysis);
+       (c) incorporate the Software or Derivative Works into a product or service offered by or on behalf of a for‑profit entity, except for internal evaluation of non‑production prototypes.
+
+5. No Trademark or Brand Rights
+   This License does not grant permission to use the names, logos, or trademarks of the VISUO1 project or its contributors.
+
+6. Patents
+   No patent license is granted by this License. If You or Your employer initiates patent litigation (including a cross‑claim or counterclaim) alleging that the Software or a Derivative Work infringes a patent, this License shall terminate as of the date such litigation is filed.
+
+7. No Warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON‑INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Limitation of Liability
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY INDIRECT, SPECIAL, INCIDENTAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR ANY LOSS OF USE, DATA, BUSINESS, OR PROFITS, ARISING OUT OF OR IN CONNECTION WITH THIS LICENSE OR THE USE OF THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+9. Termination
+   9.1 This License terminates automatically if You breach any term of this License and fail to cure such breach within 30 days of notice.
+   9.2 Upon termination, You must cease all use and distribution of the Software and Derivative Works; however, Your obligations under Sections 3, 5, 7, and 8 shall survive.
+
+10. Commercial Licensing
+   If You wish to use the Software for Commercial purposes, You must obtain a separate commercial license. To inquire, please open an issue in the repository or contact the maintainers via the project homepage.
+
+11. Severability
+   If any provision of this License is held unenforceable, the remaining provisions shall remain in full force and effect.
+
+END OF TERMS
