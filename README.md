@@ -1,6 +1,234 @@
-# VISUO1: SWIR Time‑Series Imaging & Analysis Desktop Application
+<!-- ORIGINAL (LEGACY) INTRO SECTION BELOW PRESERVED -->
+# VISUO1: A Platform for SWIR Time-Series Image Analysis
 
-VISUO1 is a PyQt6 desktop application for preclinical short‑wave infrared (SWIR) fluorescence time‑series studies. It ingests raw widefield (WF) and fluorescence (FL) image pairs, standardizes them (registration, cropping, overlays), extracts quantitative radiomics features, performs spatiotemporal signal path analysis, and provides ranking & clustering analytics (DTW, mixed‑effects modeling, heatmap generation).
+VISUO1 is a powerful and comprehensive desktop application built with Python and PyQt6, designed to automate the entire workflow for analyzing time-series data from preclinical short-wave infrared (SWIR) imaging studies.
+
+The application intelligently handles everything from initial file discovery and image registration to advanced statistical analysis and data visualization, ensuring consistency, reproducibility, and the discovery of meaningful biological insights from complex imaging datasets.
+
+## Application Preview
+
+VISUO1 Application
+<img width="1726" height="1094" alt="Screenshot 2025-10-08 at 7 48 31 PM" src="https://github.com/user-attachments/assets/8263fa6a-f6f4-44a0-bb75-5bae672a6ab2" />
+
+## ✨ Core Features
+
+*   **Automated File Discovery:** Scans directories to automatically parse and group time-series image pairs based on filename metadata.
+*   **Live Interactive Preview:** A real-time preview panel for configuring all processing parameters (overlay, intensity, LUT) before batch processing.
+*   **Advanced Registration:**
+  *   **Universal Template-Based:** Aligns the entire dataset to a common reference template for inter-animal consistency.
+  *   **Intra-Animal Time-Series:** Aligns all frames for a single animal to its first time point to correct for movement over long sessions.
+*   **Quantitative Feature Extraction:** Utilizes the powerful `pyradiomics` library to extract a wide range of quantitative features (First Order, GLCM, GLSZM) from defined signal regions.
+*   **Spatiotemporal Signal Path Analysis:** Generates advanced visualizations to track signal dynamics over time, including:
+  *   **Animated GIFs:** Creates a dynamic movie of the signal progression for each animal, complete with a time-progression bar.
+  *   **Time-Coded Contour & Phase Maps:** Visualizes the signal's spatial boundaries and persistence over time, overlaid on the animal's anatomy.
+*   **Sophisticated Data Analysis:**
+  *   **Feature Ranking:** Employs statistical models (DTW, LME) to rank features based on unsupervised clustering or specific scientific hypotheses.
+  *   **Heatmap Clustering:** Generates univariate and multivariate heatmaps to visualize similarities between experimental groups based on their time-series profiles.
+*   **Reproducibility:** Save and load the entire application state, including all UI settings and file paths, to a JSON file for perfectly reproducible analysis.
+
+##  Workflow Overview
+
+The application is organized into two main stages: Processing and Analysis.
+
+### 1. Image Processing Pipeline
+This stage transforms raw, inconsistently positioned images into standardized, quantitative data and visualizations.
+
+![20250716_G11-M-12Gy-SHOV-A02_animation](https://github.com/user-attachments/assets/810d940a-a7d1-43ae-9123-68608a4b643d)  ![20250711_G07-F-00Gy-DIZE-A03_animation](https://github.com/user-attachments/assets/868445ef-c2f8-4ffe-ba61-c5951fe8f0e8)
+
+*   **Data Input:** The user selects a main data directory and an output directory. The app automatically finds and groups all `_WF_` (widefield) and `_FL_` (fluorescence) image pairs.
+*   **Configuration:** Using the live preview, the user configures global settings like intensity normalization, LUT colormaps, registration templates, and the final cropping ROI.
+*   **Batch Processing:** In a background thread, the app processes every animal to generate:
+  *   Individual and Master Time-Series Collages.
+  *   Animated GIFs with a time-progression bar.
+  *   Advanced Signal Path Analysis maps (Contour, Phase).
+  *   Two primary data files:
+    *   `_Raw_Results.csv`: Contains every calculated feature for each animal at every time point.
+    *   `_Group_Summary.csv`: Contains aggregated statistics (mean, median, std) for each experimental group.
+
+![G05-F-12Gy-DIZE_MASTER_COLLAGE](https://github.com/user-attachments/assets/16660de4-378b-48ff-93b5-498396065dc9)
+
+### 2. Data Analysis Pipeline
+This stage provides tools to interpret the data generated during processing.
+
+*   **Feature Ranking:** Load the `_Raw_Results.csv` to identify the most significant features using three methods:
+  *   **Overall Ranking (Unsupervised):** Finds features that best separate groups based on Dynamic Time Warping (DTW) distance.
+  *   **Interaction Effect (Hypothesis-Driven):** Uses a Linear Mixed-Effects model to test for interactions between factors (e.g., Time & Dose).
+  *   **Normalization Effect (Hypothesis-Driven):** Ranks features on their ability to show a return-to-baseline effect for a treated group.
+*   **Heatmap Clustering:** Load the `_Group_Summary.csv` to generate clustered heatmaps that visualize the similarity between experimental groups, either for a single feature or averaged across all features.
+<img width="4156" height="4294" alt="multivariate_clustered_heatmap" src="https://github.com/user-attachments/assets/41a27b4a-0683-4984-a179-1530aea7cc0b" />
+
+## 🔧 Technology Stack
+
+*   **GUI Framework:** PyQt6
+*   **Core Numerical & Array Operations:** NumPy
+*   **Image Processing & Analysis:** OpenCV, Scikit-image, Tifffile
+*   **Statistical Feature Extraction:** Pyradiomics
+*   **Data Handling & Analysis:** Pandas, Statsmodels
+*   **Plotting & Visualization:** Matplotlib, Seaborn
+*   **Animation:** Imageio
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+*   Python 3.8 or newer
+*   An environment manager like `venv` or `conda` is recommended.
+
+### Installation & Running
+
+1.  **Clone the repository:**
+  ```bash
+  git clone https://github.com/your-username/VISUO1.git
+  cd VISUO1
+  ```
+
+2.  **Create a virtual environment (recommended):**
+  ```bash
+  python -m venv venv
+  source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+  ```
+
+3.  **Install the required dependencies:**
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+4.  **Run the application:**
+  ```bash
+  python main.py
+  ```
+
+## 📁 Project Architecture
+
+The project uses a modular architecture that separates the user interface from the backend processing logic.
+
+<!-- END OF ORIGINAL SECTION -->
+
+---
+## APPENDIX A: Extended Architecture & Packaging (New)
+
+> The following appendix augments the original README with deeper architectural details, module‑level responsibilities, data/analysis pipelines, and full standalone packaging guidance for macOS and Windows.
+
+### A.1 High-Level Capabilities (Consolidated)
+| Area | Highlights |
+|------|------------|
+| File Discovery | Regex-driven grouping of WF/FL pairs. |
+| Preview & ROI | Multi-ROI overlay, composite operations, adaptive mapping on zoom/pan. |
+| Registration | Intra-series alignment + optional template centering utility. |
+| Radiomics | Pyradiomics feature classes; optional lightweight legacy fallback. |
+| Spatiotemporal | Contour evolution, phase map, temporal color progression GIFs. |
+| Analytics | DTW ranking, mixed-effects hypotheses, clustering heatmaps. |
+| Packaging | PyInstaller spec + wrapper for turnkey distribution. |
+
+### A.2 Detailed Directory Map
+```
+app/
+  main.py                 # Entry + single-instance guard
+  gui/
+  main_window.py        # Orchestrates panels, threads, processing lifecycle
+  preview_panel.py       # Zoomable image view, overlays, timestamp, multi-ROI
+  settings_panel.py      # Visualization, intensity window, registration toggles
+  analysis_panel.py      # Ranking + heatmap triggers and exports
+  feature_selection_panel.py # Radiomics feature selection UI
+  interactive_roi.py     # Crop ROI widget with handles
+  multi_roi_overlay.py   # Multi-shape ROI editing + composite logic
+  roi_manager.py         # ROI data model & serialization
+  outline_overlay.py     # Passive outline overlay (currently disabled in settings)
+  worker.py              # Threaded processing pipeline implementation
+  splash_screen.py       # Optional video splash
+  processing/
+  file_handler.py        # Filename parsing & grouping utilities
+  image_processor.py     # LUT, overlay, cropping, gradients, animations
+  registration.py        # Template centering helper
+  signal_path_analysis.py# Contour/phase/time maps & ECC registration
+  feature_extraction.py  # Pyradiomics feature extraction wrapper
+  _feature_extraction.py # Legacy simple feature set
+  timeseries_analysis.py # DTW ranking, mixed-effects, summarization
+  heatmap_generator.py   # DTW distance matrices + clustering
+packaging/
+  run_visuo1.py            # PyInstaller wrapper
+  visuo1.spec              # Build spec (hiddenimports, datas)
+  build_macos.sh           # macOS build script
+  build_windows.bat        # Windows build script
+```
+
+### A.3 Processing Pipeline Contracts
+| Stage | Input | Output | Notes |
+|-------|-------|--------|-------|
+| Discovery | Folder of TIFFs | grouped dict | Robust to extra tokens. |
+| Registration (optional) | WF/FL frames | aligned frames | ECC or template shift. |
+| Crop & Overlay | Aligned frames + ROI | Composite RGB frames | Intensity window + LUT applied. |
+| Feature Extraction | Cropped or full region | Feature rows | Pyradiomics per time point. |
+| Signal Path | FL frames | Contours, phase maps | Otsu + boost segmentation. |
+| Aggregation | Feature rows | Raw + Group CSVs | Group stats (mean/median/std). |
+| Analytics | CSVs | Rankings, heatmaps | DTW + mixed effects modeling. |
+
+### A.4 Ranking Algorithms Summary
+| Algorithm | Core Metric | Strength |
+|-----------|------------|----------|
+| DTW Separation | Distance dispersion between group curves | Captures temporal shape differences |
+| Mixed Effects Interaction | p-value / effect size | Tests factor interplay (e.g., Dose×Time) |
+| Normalization Effect | Deviation return score | Highlights recovery-to-baseline patterns |
+
+### A.5 Packaging Quick Reference
+| Task | Command (macOS) | Command (Windows) |
+|------|-----------------|-------------------|
+| Prep venv | `python -m venv build_env; source build_env/bin/activate` | `python -m venv build_env && build_env\Scripts\activate` |
+| Install deps | `pip install -r requirements.txt pyinstaller` | Same |
+| Build | `pyinstaller --clean --noconfirm packaging/visuo1.spec` | Same with backslashes |
+| Run Result | `open dist/VISUO1/VISUO1` | `dist\VISUO1\VISUO1.exe` |
+
+### A.6 Resource Handling in Bundles
+Use:
+```python
+BASE_DIR = getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)
+```
+Add `datas` entries in spec for icons, templates, defaults.
+
+### A.7 Troubleshooting (Extended)
+| Symptom | Likely Cause | Resolution |
+|---------|-------------|------------|
+| Missing SimpleITK at runtime | Hidden import omitted | Add to spec hiddenimports (already present). |
+| Blank heatmap figure | No matching aggregation columns | Verify `_Group_Summary.csv` and chosen suffix. |
+| Ranking empty list | Non-numeric feature cols | Ensure coercion; inspect CSV head. |
+| ROI composite fails | <2 valid sources | Validate selected component ROI IDs. |
+
+### A.8 Future Enhancements
+- Pluggable feature extraction adapters (e.g., deep embeddings).  
+- GPU-accelerated DTW / contour extraction.  
+- Incremental processing resume.  
+- Auto-update & crash reporting channel.  
+
+### A.9 Glossary
+| Term | Definition |
+|------|------------|
+| WF | Widefield grayscale image channel. |
+| FL | Fluorescence intensity image channel. |
+| ROI | Region of Interest (rect/ellipse/contour/text). |
+| DTW | Dynamic Time Warping distance between temporal sequences. |
+
+---
+## APPENDIX B: Original + Extended Quick Build Recap
+```bash
+# macOS (source)
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python app/main.py
+
+# macOS (package)
+./packaging/build_macos.sh
+
+# Windows (source)
+python -m venv venv && venv\Scripts\activate
+pip install -r requirements.txt
+python app\main.py
+
+# Windows (package)
+packaging\build_windows.bat
+```
+
+---
+_Appendices added without altering original descriptive content._
 
 ---
 ## Table of Contents
