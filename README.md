@@ -8,7 +8,7 @@ The application intelligently handles everything from initial file discovery and
 ## Application Preview
 
 VISUO1 Application
-<img width="1726" height="1094" alt="Screenshot 2025-10-08 at 7 48 31 PM" src="https://github.com/user-attachments/assets/8263fa6a-f6f4-44a0-bb75-5bae672a6ab2" />
+<img width="1728" height="1117" alt="Screenshot 2025-11-07 at 11 40 18 AM" src="https://github.com/user-attachments/assets/f05ac583-2a6f-4fc6-8797-d84fc52c0d3e" />
 
 ## ✨ Core Features
 
