@@ -230,6 +230,10 @@ packaging\build_windows.bat
 ---
 _Appendices added without altering original descriptive content._
 
+## License
+
+VISUO1 is distributed under the VISUO1 Non‑Commercial Research License (NCRL) v1.0. See `LICENSE` for the full terms and `LICENSE-POLICY.md` for a plain‑language summary. For commercial licensing inquiries, please open an issue in this repository to contact the maintainers.
+
 ---
 ## Table of Contents
 1. Overview & Core Capabilities  
